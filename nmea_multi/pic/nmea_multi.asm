@@ -27,7 +27,7 @@
 #include <p16f1705.inc>
 
         CONFIG  FOSC=INTOSC
-        CONFIG  WDTE=OFF, PWRTE=OFF, MCLRE=OFF, CP=OFF, CLKOUTEN=ON
+        CONFIG  WDTE=OFF, PWRTE=OFF, MCLRE=OFF, CP=OFF, CLKOUTEN=ON, LVP=OFF
 
         RADIX   dec
 
@@ -350,30 +350,33 @@ INPUT_CNTL      equ     0x64E           ; Counter for waiting for serial input (
 ;;; Constants:
 
 MAJOR_VERSION   equ     '0'             ; Major version number
-MINOR_VERSION   equ     '1'             ; Minor version number
+MINOR_VERSION   equ     '2'             ; Minor version number
 
-SLOW0_NUM       equ     0               ; Overall channel number for slow channel 0
-SLOW1_NUM       equ     1               ; Overall channel number for slow channel 1
-SLOW2_NUM       equ     5               ; Overall channel number for slow channel 2
-SLOW3_NUM       equ     6               ; Overall channel number for slow channel 3
+CONFIG_PORT     equ     PORTA           ; Input port for configuration signal
+CONFIG_PIN      equ     RA2             ; Input pin for configuration signal
 
-FAST0_NUM       equ     2               ; Overall channel number for fast channel 0
-FAST1_NUM       equ     3               ; Overall channel number for fast channel 1
-FAST2_NUM       equ     4               ; Overall channel number for fast channel 2
-FAST3_NUM       equ     7               ; Overall channel number for fast channel 3
+FAST0_NUM       equ     0               ; Overall channel number for fast channel 0
+FAST1_NUM       equ     1               ; Overall channel number for fast channel 1
+FAST2_NUM       equ     2               ; Overall channel number for fast channel 2
+FAST3_NUM       equ     3               ; Overall channel number for fast channel 3
 
-SLOW_PORT       equ     PORTC           ; Input port for slow channels
+SLOW0_NUM       equ     4               ; Overall channel number for slow channel 0
+SLOW1_NUM       equ     5               ; Overall channel number for slow channel 1
+SLOW2_NUM       equ     6               ; Overall channel number for slow channel 2
+SLOW3_NUM       equ     7               ; Overall channel number for slow channel 3
+
 FAST_PORT       equ     PORTA           ; Input port for fast channels
+SLOW_PORT       equ     PORTC           ; Input port for slow channels
 
-SLOW0_PIN       equ     RC2             ; Input pin for slow channel 0
-SLOW1_PIN       equ     RC1             ; Input pin for slow channel 1
-SLOW2_PIN       equ     RC3             ; Input pin for slow channel 2
-SLOW3_PIN       equ     RC4             ; Input pin for slow channel 3
-
-FAST0_PIN       equ     RA2             ; Input pin for fast channel 0
-FAST1_PIN       equ     RA1             ; Input pin for fast channel 1
+FAST0_PIN       equ     RA1             ; Input pin for fast channel 0
+FAST1_PIN       equ     RA0             ; Input pin for fast channel 1
 FAST2_PIN       equ     RA5             ; Input pin for fast channel 2
-FAST3_PIN       equ     RA0             ; Input pin for fast channel 3
+FAST3_PIN       equ     RA3             ; Input pin for fast channel 3
+
+SLOW0_PIN       equ     RC5             ; Input pin for slow channel 0
+SLOW1_PIN       equ     RC4             ; Input pin for slow channel 1
+SLOW2_PIN       equ     RC3             ; Input pin for slow channel 2
+SLOW3_PIN       equ     RC2             ; Input pin for slow channel 3
 
 BANK_MASKH      equ     0x0F            ; Banks 8-11 in use and ...
 BANK_MASKL      equ     0xFE            ; ... banks 1-7 in use
@@ -396,7 +399,7 @@ TM_VALID_FLAGS  equ     FLAGS           ; Which flags byte to use for flag indic
                                         ; ... valid, used for timing the main loop
 TM_VALID_BIT    equ     6               ; The bit
 
-SD_CH_FLAGS     equ     FLAGS           ; Which flags byte to use for whether a char is reday to send
+SD_CH_FLAGS     equ     FLAGS           ; Which flags byte to use for whether a char is ready to send
 SD_CH_BIT       equ     4               ; The bit
 
 CHN_OUT_FLAGS   equ     FLAGS           ; Which flags byte to use for channel output setting
@@ -420,8 +423,8 @@ settings        macro
         retlw   0x00            ; Suppression channel 3
         retlw   0x00            ; Suppression channel 4
         retlw   0x00            ; Suppression channel 5
-        retlw   0x40            ; Suppression channel 6
-        retlw   0x80            ; Suppression channel 7
+        retlw   0x00            ; Suppression channel 6
+        retlw   0x00            ; Suppression channel 7
         retlw   0x00            ; Suppression channel 8
 
         retlw   0x00            ; Discard channel 1
@@ -433,7 +436,7 @@ settings        macro
         retlw   0x00            ; Discard channel 7
         retlw   0x00            ; Discard channel 8
 
-        retlw   0x00            ; Channel output
+        retlw   0x01            ; Channel output
         retlw   0x0F            ; Fast channels
         retlw   0x01            ; Return newline
         retlw   0x00            ; Inverted input
@@ -472,7 +475,7 @@ endif
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; For calling code in the far segment from the near segment.
-nfcall   macro   label
+nfcall  macro   label
 
 errorlevel      -306
         movlp   0x08
@@ -485,7 +488,7 @@ errorlevel      +306
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; For calling code in the veryfar segment from the near segment.
-nvcall   macro   label
+nvcall  macro   label
 
         movlp   0x10
 errorlevel      -306
@@ -811,7 +814,7 @@ done2:                          ; 19 cycles to here
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; 46 = 41 + 5 cycles including nfcall and return. Finishes storage
-;;; of a character or does some work sending it. The send2 paraemter
+;;; of a character or does some work sending it. The send2 parameter
 ;;; indicates what kind of sending work should be done.
 mv_char2        macro   channel, send2
         local   finish_bank_setup
@@ -1125,17 +1128,7 @@ start_lp:
         nvcall  load_user_settings
         nvcall  init2
 
-        movlw   0x04            ; Take a break of about 100 ms (clock is 32 MHz)
-        clrf    CHAR0           ; It is ok to use CHAR storage for this
-        clrf    CHAR0 + 1
-        clrf    CHAR0 + 2
-start_lp2:
-        decfsz  CHAR0 + 2, f
-        goto    start_lp2
-        decfsz  CHAR0 + 1, f
-        goto    start_lp2
-        decfsz  CHAR0, f
-        goto    start_lp2
+        nvcall  wait_100ms
 
 main:
         read1   READF0
@@ -1334,52 +1327,16 @@ main:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 25 cycles incuding call and return. Check for UART input and go to
-;;; interactive mode if input is present after a quiet period of
-;;; 0x1000 calls to chk_input.
+;;; 25 cycles incuding call and return. Check for configuration signal
+;;; and go to interactive mode if low.
+
 chk_input:
-        movlb   12
-
-        incf    INPUT_CNTH, f
-        incfsz  INPUT_CNTL, f
-        decf    INPUT_CNTH, f   ; INPUT_CNTH:L++
-
-        btfsc   INPUT_CNTH, 4
-        clrf    INPUT_CNTL      ; Stop at INPUT_CNTH:L = 0x1000
-
-        movlb   3
-
-        btfsc   RC1STA, OERR
-        bcf     RC1STA, CREN    ; Clear CREN on error
-        bsf     RC1STA, CREN
-
-        movlb   0
-
-        btfss   PIR1, RCIF
-        goto    return_in_10    ; 22 cycles to here
-
-chk_input_found:                ; 13 cycles to here
-;;; Only go to interactive mode if there has been a period of quiet
-        movlb   12
-
-        btfsc   INPUT_CNTH, 4
-        goto    chk_input_go_to_inter
-
-        clrf    INPUT_CNTH      ; Clear counter and wait for quiet
-        clrf    INPUT_CNTL
-
-        movlb   3
-        movfw   RC1REG          ; Read char
-        movlb   0
-
-        return                  ; 22 cycles to here
-
-chk_input_go_to_inter:
-        movlb   0
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        goto    return_in_21    ; 22 cycles to here
 
         nvcall  interactive_start
 
-        return
+        return                  ; timing does not matter after interactive session
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1905,7 +1862,7 @@ send_setup:                     ; 5 cycles to here
 
 send_setup2:                    ; 8 cycles to here
         btfsc   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_12    ; No room for next char, 21 cycles to here
+        goto    freturn_in_12   ; No room for next char, 21 cycles to here
 
         bcf     SEND_BK, 4
 
@@ -2522,36 +2479,53 @@ inter_set_schmitt:
 ;;; inter_error_just_read that will go to the first newline (which may
 ;;; be the last read char in W) and print an error.
 interactive_start:
+        movlw   '\r'
+        btfsc   NEWLINE_FLAGS, NEWLINE_BIT
+        call    write_char
         movlw   '\n'
         call    write_char
-        movlw   'I'
+
+        call    wait_100ms
+
+        movlw   '\r'
+        btfsc   NEWLINE_FLAGS, NEWLINE_BIT
         call    write_char
-        movlw   'n'
+        movlw   '\n'
         call    write_char
-        movlw   't'
+
+        call    wait_100ms
+
+        movlw   '\r'
+        btfsc   NEWLINE_FLAGS, NEWLINE_BIT
         call    write_char
-        movlw   'e'
+        movlw   '\n'
         call    write_char
-        movlw   'r'
+
+        call    speed_4800
+
+        call    wait_100ms
+
+        movlw   '\n'            ; No return-newline in debug mode
         call    write_char
-        movlw   'a'
-        call    write_char
-        movlw   'c'
-        call    write_char
-        movlw   't'
-        call    write_char
-        movlw   'i'
-        call    write_char
-        movlw   'v'
-        call    write_char
-        movlw   'e'
-        call    write_char
+
         movlw   '\n'
         call    write_char
 
         call    clear_input
 
+        goto    interactive_no_ok
+
 interactive:                    ; This is where all the following goto's come back to
+        movlw   'O'
+        call    write_char
+
+        movlw   'k'
+        call    write_char
+
+        movlw   '\n'
+        call    write_char
+
+interactive_no_ok:
         call    read_cmd
 
         btfsc   STATUS, Z
@@ -2610,14 +2584,13 @@ interactive:                    ; This is where all the following goto's come ba
         btfsc   STATUS, Z
         goto    inter_cmd_factory
 
-        addlw   'R' - 'X'
-        btfsc   STATUS, Z
-        goto    inter_cmd_done
-
 inter_error_lp:
         call    read_char
 
 inter_error_just_read:          ; goto this place when a wrong char has just been read
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        goto    inter_done
+
         sublw   '\n'
         btfss   STATUS, Z
         goto    inter_error_lp
@@ -2636,7 +2609,7 @@ inter_error:
         movlw   '\n'
         call    write_char
 
-        goto    interactive
+        goto    interactive_no_ok
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -2705,8 +2678,12 @@ read_char:
 
         movlb   0
 
+read_char_lp:
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        return                  ; Return if CONFIG signal high (should not be in interactive mode)
+
         btfss   PIR1, RCIF
-        goto    $-1             ; Wait for data
+        goto    read_char_lp    ; Wait for data
 
         movlb   3
         movfw   RC1REG
@@ -2719,6 +2696,11 @@ read_char:
 ;;; Read an input command.
 read_cmd:
         call    read_char
+
+        bsf     STATUS, Z
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        return                  ; Return error if CONFIG signal high (should not be in interactive mode)
+
         movwf   INTER_VALUE
         sublw   '\n'
         btfss   STATUS, Z
@@ -3102,7 +3084,7 @@ inter_cmd_output:
 
         call    inter_output_schmitt
 
-        goto    interactive
+        goto    interactive_no_ok
 
 ;;; //////////
 
@@ -3159,30 +3141,14 @@ inter_cmd_debug:
 
         call    output_debug
 
-        goto    interactive
+        goto    interactive_no_ok
 
 ;;; //////////
 
-inter_cmd_done:
-        bcf     STATUS, Z       ; Indicate that no error has occurred
-
-        call    read_newline
-
-        btfsc   STATUS, Z
-        goto    inter_error_just_read
-
-        movlw   'D'
-        call    write_char
-        movlw   'o'
-        call    write_char
-        movlw   'n'
-        call    write_char
-        movlw   'e'
-        call    write_char
-        movlw   '\n'
-        call    write_char
-
+inter_done:
         call    init2
+
+        call    wait_100ms
 
         return
 
@@ -3618,6 +3584,8 @@ init:
 
         bcf     TRISC, TRISC0   ; RC0 as output
 
+        bcf     OPTION_REG, NOT_WPUEN ; Enable weak pull-up
+
         movlb   3
 
         clrf    ANSELA          ; All PORTA pins as digital
@@ -3635,13 +3603,13 @@ init:
 
         movlb   28
 
-        movlw   0x15
-        movwf   RXPPS           ; C5 is UART receive
+        movlw   0x11
+        movwf   RXPPS           ; RC1 is UART receive
 
         movlb   29
 
         movlw   0x14
-        movwf   RC0PPS          ; C0 as UART transmit
+        movwf   RC0PPS          ; RC0 as UART transmit
 
         movlb   0
 
@@ -3803,6 +3771,24 @@ speed_4800:
         movlw   130
         movwf   SP1BRGL         ; 4,799 baud
         movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait a little
+wait_100ms:
+        movlw   0x04            ; Take a break of about 100 ms (clock is 32 MHz)
+        movwf   CHAR0
+        clrf    CHAR0 + 1
+        clrf    CHAR0 + 2
+wait_100ms_lp:
+        decfsz  CHAR0 + 2, f
+        goto    wait_100ms_lp
+        decfsz  CHAR0 + 1, f
+        goto    wait_100ms_lp
+        decfsz  CHAR0, f
+        goto    wait_100ms_lp
 
         return
 
