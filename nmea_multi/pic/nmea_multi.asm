@@ -270,7 +270,7 @@ BANK0           equ     0x30            ; Bank for each channel. 0xFF bank not f
 SUPPRESS0       equ     0x38            ; Suppress masks. One for each channel
 TIMER0H         equ     0x40            ; Counters for busy channels, one for each channel
 TIMER0L         equ     0x48            ; And low part for each channel
-DISCARD_CODE0   equ     0x50            ; Start char - 31 to discard for each channel, 0 means no discard
+DISCARD_CHAR0   equ     0x50            ; Start char to discard for each channel, 0 means no discard
 
 READF0          equ     0x58            ; Fast port data at time 0
 READF1          equ     0x59            ; Fast port data at time 1
@@ -685,7 +685,7 @@ mv_char macro   channel
         btfsc   STATUS, Z
         goto    done2           ; char is '\r' or '\n' so don't store
 
-        addwf   DISCARD_CODE0 + channel, W
+        subwf   DISCARD_CHAR0 + channel, W
         btfsc   STATUS, Z
         goto    discard3        ; first char indicates that sentence should be discarded
 
@@ -2153,44 +2153,28 @@ load_settings:
         movwf   SUPPRESS0 + 7
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 0
+        movwf   DISCARD_CHAR0 + 0
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 1
+        movwf   DISCARD_CHAR0 + 1
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 2
+        movwf   DISCARD_CHAR0 + 2
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 3
+        movwf   DISCARD_CHAR0 + 3
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 4
+        movwf   DISCARD_CHAR0 + 4
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 5
+        movwf   DISCARD_CHAR0 + 5
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 6
+        movwf   DISCARD_CHAR0 + 6
 
         moviw   FSR1++
-        btfss   STATUS, Z
-        addlw   0xE1            ; Subtract 31 is not zero
-        movwf   DISCARD_CODE0 + 7
+        movwf   DISCARD_CHAR0 + 7
 
         moviw   FSR1++
         bsf     CHN_OUT_FLAGS, CHN_OUT_BIT
@@ -2251,44 +2235,28 @@ save_user_settings:
         movfw   SUPPRESS0 + 7
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 0
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 0
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 1
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 1
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 2
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 2
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 3
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 3
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 4
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 4
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 5
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 5
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 6
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 6
         call    save_byte
 
-        movfw   DISCARD_CODE0 + 7
-        btfss   STATUS, Z
-        addlw   0x1F
+        movfw   DISCARD_CHAR0 + 7
         call    save_byte
 
         movlw   0x01
@@ -3042,23 +3010,25 @@ inter_cmd_discard:
         goto    inter_error_just_read
 
         movfw   INTER_VALUE
-        bsf     STATUS, C
-        btfss   STATUS, Z
-        addlw   0xE0            ; -32
-        bsf     STATUS, Z       ; Set zero flag in case of error
-        movlw   '\n'            ; Set last char in case of error
-        btfss   STATUS, C
-        goto    inter_error_just_read   ; Error: value > 0 and < 32
+        btfsc   STATUS, Z
+        goto    discard_ok      ; A value of zero is ok
 
-        movlw   HIGH(DISCARD_CODE0)
+        call    convert_char
+        addlw   0               ; Update zero flag
+        btfss   STATUS, Z
+        incf    WREG, W
+        movlw   '\n'            ; Set last char in case of error
+        btfsc   STATUS, Z
+        goto    inter_error_just_read   ; Error binary char chosen
+
+discard_ok:
+        movlw   HIGH(DISCARD_CHAR0)
         movwf   FSR1H
         movfw   INTER_CHANNEL
-        addlw   LOW(DISCARD_CODE0)
+        addlw   LOW(DISCARD_CHAR0)
         movwf   FSR1L
 
         movfw   INTER_VALUE
-        btfss   STATUS, Z       ; Leave a zero setting alone
-        addlw   0xE1            ; Subtract 31 from other settings
         movwf   INDF1
 
         goto    interactive
@@ -3319,10 +3289,10 @@ inter_output_suppress:
 inter_output_discard:
         movwf   INTER_CHANNEL
 
-        movlw   HIGH(DISCARD_CODE0)
+        movlw   HIGH(DISCARD_CHAR0)
         movwf   FSR1H
         movfw   INTER_CHANNEL
-        addlw   LOW(DISCARD_CODE0)
+        addlw   LOW(DISCARD_CHAR0)
         movwf   FSR1L
 
         movlw   'D'
@@ -3333,8 +3303,6 @@ inter_output_discard:
         call    write_char
 
         movfw   INDF1
-        btfss   STATUS, Z       ; Leave a zero setting alone
-        addlw   0x1F            ; Add 31 to other settings
         call    write_hex
 
         movlw   '\n'
