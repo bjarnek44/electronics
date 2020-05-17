@@ -167,14 +167,16 @@
 ;;; characters needs to be sent per round, so the capacity is
 ;;; sufficient for that.
 ;;;
-;;; All this leaves four time slots of around 48 cycles. One is left
-;;; empty and the three others do the following:
+;;; All this leaves four time slots of around 48 cycles. These are
+;;; used as follows:
 ;;;
 ;;;   chk_time: checks that the main loop always takes 3,333 cycles
 ;;;             (for debug output).
 ;;;
 ;;;   chk_input: checks for input and goes to interactive mode when
-;;;              appropriate.
+;;;              appropriate. Also adjusts suppression timers.
+;;;
+;;;   hdl_time: Adjust more suppression timers.
 ;;;
 ;;;   chk_new_msg: frees banks that are marked as being used but with
 ;;;                no new sentences being put in the bank.
@@ -206,7 +208,7 @@
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g2  S_s2a       R_f3/s2  S_s2b
 ;;;    * R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     S_s3a       R_f3     S_s3b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g3  P_s0  P_s1  R_f3/s3  chk_input
-;;;  ___ R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     -           ___
+;;;  ___ R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     hdl_time    ___
 ;;;     | 52 cycles            | 52 cycles            | 52 cycles          | 52 cycles          |
 ;;;
 ;;;  * = extra cycle: nop / loop goto
@@ -242,7 +244,7 @@
 ;;; fourth one for settings:
 ;;;
 ;;;   near:     0x0000-0x07FF  start, main loop, chk functions, parse functions
-;;;   far:      0x0000-0x07FF  stora, send
+;;;   far:      0x0000-0x07FF  store, send
 ;;;   veryfar:  0x1000-0x17FF  all interactive mode, init functions
 ;;;   settings: 0x1F60-0x1FFF
 ;;;
@@ -339,11 +341,10 @@ STUCK_BANK      equ     0x64A           ; A bank observed to be stuck (otherwise
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
 CNT_SLOW        equ     0x64C           ; Counter for sentences dropped due to taking too long
+CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
 
-INPUT_CNTH      equ     0x64D           ; Counter for waiting for serial input (high part)
-INPUT_CNTL      equ     0x64E           ; Counter for waiting for serial input (low part)
-
-;;; 0x64F is free
+INPUT_CNTH      equ     0x64E           ; Counter for waiting for serial input (high part)
+INPUT_CNTL      equ     0x64F           ; Counter for waiting for serial input (low part)
 
 ;; /////////////////////////////////////////////////////////////////////////////
 
@@ -384,11 +385,7 @@ BANK_MASKL      equ     0xFE            ; ... banks 1-7 in use
 FRAME_REC_CNT_S equ     0x10            ; Stop bits to read before recovering from frame error on slow ch
 FRAME_REC_CNT_F equ     0x80            ; Stop bits to read before recovering from frame error on fast ch
 
-TIMER_FAST_HIGH equ     0x2E            ; Timer for fast channel suppression
-TIMER_FAST_LOW  equ     0xE0            ; 12000 = 2.5 seconds
-
-TIMER_SLOW_HIGH equ     0x17            ; Timer for fast channel suppression
-TIMER_SLOW_LOW  equ     0x70            ; 6000 = 2.5 seconds for slow channels
+TIMER_HIGH      equ     0xE8            ; Timer for suppression, around 2.5 s
 
 DISCARD_BANK    equ     12              ; Artifical unused bank number
 
@@ -477,11 +474,11 @@ endif
 ;;; For calling code in the far segment from the near segment.
 nfcall  macro   label
 
-errorlevel      -306
         movlp   0x08
+errorlevel      -306
         call    label
-        movlp   0x00
 errorlevel      +306
+        movlp   0x00
 
         endm
 
@@ -495,6 +492,19 @@ errorlevel      -306
         call    label
 errorlevel      +306
         movlp   0x00
+
+        endm
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; For calling code in the veryfar segment from the far segment.
+fvcall  macro   label
+
+        movlp   0x10
+errorlevel      -306
+        call    label
+errorlevel      +306
+        movlp   0x08
 
         endm
 
@@ -612,57 +622,68 @@ done:                           ; 16 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
+;;; 8 cycles. The timers count up and stop at zero. CH_BUSY is set
+;;; while counter is still running.
+tm_step macro   channel
+
+        local   not_zero
+        local   done
+
+        movf    TIMER0H + channel, f
+        btfss   STATUS, Z
+        goto    not_zero
+
+        bcf     CH_BUSY, channel
+
+        nop
+        nop
+
+        goto    done
+
+not_zero:                       ; 4 cycles to here
+        incfsz  TIMER0L + channel, f
+        decf    TIMER0H + channel, f
+        incf    TIMER0H + channel, f
+
+        bsf     CH_BUSY, channel
+
+done:                           ; 8 cycles to here
+
+        endm
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
 ;;; 46 = 43 + 3 cycles including call and return. Stores a character
 ;;; for a particular channel.
-mv_char macro   channel, is_slow
+mv_char macro   channel
 
-        local   tmr_xx_00
-        local   tmr_xx_xx
-        local   tmr_00_00
-        local   tmr_done
         local   discard3
         local   discard2
         local   store
         local   finish
+        local   binary
+        local   binary_discard
         local   finish_discard
         local   discard
         local   overflow
         local   done
         local   done2
 
-        bsf     CH_BUSY, channel
-        movf    TIMER0L + channel, f
-        btfss   STATUS, Z
-        goto    tmr_xx_xx
-
-        movf    TIMER0H + channel, f
-        btfss   STATUS, Z
-        goto    tmr_xx_00
-
-tmr_00_00:                      ; 7 cycles to here
-        bcf     CH_BUSY, channel
-        goto    tmr_done
-
-tmr_xx_xx:                      ; 5 cycles to here
-        decf    TIMER0L + channel, f
-        nopm    2
-        goto    tmr_done
-
-tmr_xx_00:                      ; 8 cycles to here
-        decf    TIMER0H + channel, f
-        decf    TIMER0L + channel, f
-
-tmr_done:                       ; 10 cycles to here
         btfss   CH_RDY, channel
         goto    done            ; no char is ready, so do nothing
+
+        bcf     CH_RDY, channel
+
+        movfw   CHAR0 + channel
+        fvcall  convert_char    ; 8 cycles
+        movwf   CHAR0 + channel ; 13 cycles to here
 
         incfsz  BANK0 + channel, W
         goto    store           ; The bank is set, so store char appropriately
 
         movfw   CHAR0 + channel
-        sublw   0x1F
-        btfsc   STATUS, C
-        goto    done2           ; char of 0-31, so don't store
+        btfsc   STATUS, Z
+        goto    done2           ; char is '\r' or '\n' so don't store
 
         addwf   DISCARD_CODE0 + channel, W
         btfsc   STATUS, Z
@@ -673,11 +694,14 @@ tmr_done:                       ; 10 cycles to here
         btfss   STATUS, Z
         goto    discard2
 
+        ;; 25 cycles to here
+
         find_bk BK_FREEL, BK_FREEH, 1   ; 16 cycles, so 41 cycles to here
 
         movwf   BANK0 + channel ; BANK variable for channel set to chosen bank
 
 ;;; Carry flag was set by find_bk above and if set continuation will follow
+
         return                  ; 43 cycles to here
 
 discard3:                       ; 22 cycles to here
@@ -691,16 +715,19 @@ discard2:                       ; 26 cycles to here
 
         goto    freturn_in_14   ; 43 cycles to here
 
-store:                          ; 15 cycles to here
+store:                          ; 16 cycles to here
         movfw   CHAR0 + channel
-        sublw   0x1F
-        btfsc   STATUS, C
-        goto    finish          ; char of 0-31
+        btfss   STATUS, Z
+        incf    CHAR0 + channel, W
+        btfsc   STATUS, Z
+        goto    finish          ; char '\r', '\n' or binary
 
         movfw   BANK0 + channel
         sublw   DISCARD_BANK
         btfsc   STATUS, Z
         goto    discard
+
+        ;; 25 cycles to here
 
         movfw   BANK0 + channel
 
@@ -712,6 +739,8 @@ store:                          ; 15 cycles to here
         btfsc   STATUS, C
         goto    overflow        ; We have hit 0x70 or 0xF0 on low part of address, so overflow
 
+        ;; 32 cycles to here
+
         movfw   INDF0
         incf    INDF0, f        ; Increment pointer
 
@@ -719,20 +748,23 @@ store:                          ; 15 cycles to here
         lsrf    BANK0 + channel, W
         movwf   FSR0H           ; FSR0H:L points to storage location
 
-        bcf     CH_RDY, channel
         movfw   CHAR0 + channel
         movwf   INDF0
+
+        ;; 39 cycles to here
 
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
         bcf     STATUS, C       ; No continuation later
 
-        nop
-
         return                  ; 43 cycles to here
 
-finish:                         ; 20 cycles to here
+finish:                         ; 22 cycles to here
+        incf    CHAR0 + channel, W
+        btfsc   STATUS, Z
+        goto    binary
+
         movfw   BANK0 + channel
         sublw   DISCARD_BANK
 
@@ -743,6 +775,8 @@ finish:                         ; 20 cycles to here
         addlw   LOW(QUEUE)
         movwf   FSR0L           ; FSRH:L points to the element after the last in the queue
 
+        ;;      32 cycles to here
+
         movfw   BANK0 + channel
         movwf   INDF0           ; Put bank number in the queue
         incf    Q_END, f
@@ -751,58 +785,69 @@ finish:                         ; 20 cycles to here
         movlw   0xFF
         movwf   BANK0 + channel ; Channel set to waiting
 
-if (is_slow)
-        movlw   TIMER_SLOW_HIGH ; mv_char is not called as often for slow channels, so use lower timer value
+        movlw   TIMER_HIGH      ; reset timer
         movwf   TIMER0H + channel
-        movlw   TIMER_SLOW_LOW
-        movwf   TIMER0L + channel
-else
-        movlw   TIMER_FAST_HIGH
-        movwf   TIMER0H + channel
-        movlw   TIMER_FAST_LOW
-        movwf   TIMER0L + channel
-endif
+        clrf    TIMER0L + channel
 
         bcf     STATUS, C       ; No continuation later
 
-        goto    freturn_in_5    ; 43 cycles to here
+        return                  ; 43 cycles to here
 
-finish_discard:                 ; 25 cycles to here
+binary:                         ; 26 cycles to here
+        movfw   BANK0 + channel
+        sublw   DISCARD_BANK
+        btfsc   STATUS, Z
+        goto    binary_discard
+
+        bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
+
+        movlb   12
+        incf    CNT_BINARY, f
+        movlb   0
+
+        bsf     STATUS, C       ; set carry flag for continuation later
+
+        goto    freturn_in_8    ; 43 cycles to here
+
+
+binary_discard:                 ; 31 cycles to here
+        bcf     STATUS, C       ; No continuation later
+
+        goto    freturn_in_11   ; 43 cycles to here
+
+
+finish_discard:                 ; 30 cycles to here
         movlw   0xFF
         movwf   BANK0 + channel ; Channel set to waiting
 
         bcf     STATUS, C       ; No continuation later
 
-        goto    freturn_in_15   ; 43 cycles to here
+        goto    freturn_in_10   ; 43 cycles to here
 
-discard:                        ; 24 cycles to here
-        bcf     CH_RDY, channel
-
+discard:                        ; 26 cycles to here
         bcf     STATUS, C       ; No continuation later
 
-        goto    freturn_in_17   ; 43 cycles to here
+        goto    freturn_in_16   ; 43 cycles to here
 
-overflow:                       ; 31 cycles to here
-        bsf     BANK0 + channel, 7 ; Set bit 7 to indicate an overflow
+overflow:                       ; 33 cycles to here
+        bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
         bsf     STATUS, C       ; set carry flag for continuation later
         incf    CNT_LONG, f
 
-        goto    freturn_in_9    ; 43 cycles to here
+        goto    freturn_in_7    ; 43 cycles to here
 
-done:                           ; 13 cycles to here
+done:                           ; 3 cycles to here
         bcf     STATUS, C       ; No continuation later
 
         movfw   WAITING
         andwf   PHASE, W
         btfss   WREG, channel
-        goto    freturn_in_26   ; 43 cycles to here
+        goto    freturn_in_36   ; 43 cycles to here
 
         movlw   0xFF
         movwf   BANK0 + channel ; Channel set to waiting
 
-        bcf     STATUS, C       ; No continuation later
-
-        goto    freturn_in_22   ; 43 cycles to here
+        goto    freturn_in_33   ; 43 cycles to here
 
 done2:                          ; 19 cycles to here
         bcf     STATUS, C       ; No continuation later
@@ -818,7 +863,7 @@ done2:                          ; 19 cycles to here
 ;;; indicates what kind of sending work should be done.
 mv_char2        macro   channel, send2
         local   finish_bank_setup
-        local   overflow
+        local   invalid
 
         nopm    2
         btfsc   STATUS, C
@@ -844,7 +889,7 @@ endif
 
 finish_bank_setup:              ; 5 cycles to here
         btfsc   BANK0 + channel, 7
-        goto    overflow
+        goto    invalid
 
         movlw   0x01
         btfsc   BANK0 + channel, 1
@@ -882,16 +927,17 @@ finish_bank_setup:              ; 5 cycles to here
         lsrf    BANK0 + channel, W
         movwf   FSR0H           ; FSR0H:L points to first storage location
 
-        bcf     CH_RDY, channel
         movfw   CHAR0 + channel
         movwi   -1[FSR0]        ; Store first character
 
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
+        nop
+
         return                  ; 41 cycles to here
 
-overflow:                       ; 8 cycles to here
+invalid:                        ; 8 cycles to here
         movfw   BANK0 + channel
         call    free_bank       ; 16 cycles, so 25 cycles to here
 
@@ -1308,7 +1354,6 @@ main:
         call    parse_s0
         call    parse_s1
         read2   READS3
-        nopm    21
         call    chk_input
 
         read1   READF0
@@ -1321,22 +1366,41 @@ main:
         call    parse_s2
         call    parse_s3
         read1   READF3
-        nopm    47
+        call    hdl_time
 
         goto    main            ; extra cycle
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 25 cycles incuding call and return. Check for configuration signal
-;;; and go to interactive mode if low.
+;;; 46 cycles incuding call and return. Check for configuration signal
+;;; and go to interactive mode if low. Also adjust supression timers
+;;; for channels 0-3.
 
 chk_input:
+        tm_step 0
+        tm_step 1
+        tm_step 2
+        tm_step 3               ; 32 cycles to here
+
         btfsc   CONFIG_PORT, CONFIG_PIN
-        goto    return_in_21    ; 22 cycles to here
+        goto    return_in_10    ; 43 cycles to here
 
         nvcall  interactive_start
 
         return                  ; timing does not matter after interactive session
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 47 cycles incuding call and return. Adjust supression timers for
+;;; channels 4-7.
+
+hdl_time:
+        tm_step 4
+        tm_step 5
+        tm_step 6
+        tm_step 7               ; 32 cycles to here
+
+        goto    return_in_12    ; 44 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1577,10 +1641,6 @@ parse_f3:
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; A goto to one of these is a delayed return.
-return_in_34:
-        nop
-return_in_33:
-        nop
 return_in_32:
         nop
 return_in_31:
@@ -1652,42 +1712,42 @@ far     code    0x0800
 
 ;;; 48 cycles. Stores characters in banks.
 store_s0a:
-        mv_char SLOW0_NUM, 1
+        mv_char SLOW0_NUM
 
 ;;; //////////
 
 store_s1a:
-        mv_char SLOW1_NUM, 1
+        mv_char SLOW1_NUM
 
 ;;; //////////
 
 store_s2a:
-        mv_char SLOW2_NUM, 1
+        mv_char SLOW2_NUM
 
 ;;; //////////
 
 store_s3a:
-        mv_char SLOW3_NUM, 1
+        mv_char SLOW3_NUM
 
 ;;; //////////
 
 store_f0a:
-        mv_char FAST0_NUM, 0
+        mv_char FAST0_NUM
 
 ;;; //////////
 
 store_f1a:
-        mv_char FAST1_NUM, 0
+        mv_char FAST1_NUM
 
 ;;; //////////
 
 store_f2a:
-        mv_char FAST2_NUM, 0
+        mv_char FAST2_NUM
 
 ;;; //////////
 
 store_f3a:
-        mv_char FAST3_NUM, 0
+        mv_char FAST3_NUM
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1963,6 +2023,20 @@ free_bank:
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; A goto to one of these is a delayed return here in the far section.
+freturn_in_36:
+        nop
+freturn_in_35:
+        nop
+freturn_in_34:
+        nop
+freturn_in_33:
+        nop
+freturn_in_32:
+        nop
+freturn_in_31:
+        nop
+freturn_in_30:
+        nop
 freturn_in_29:
         nop
 freturn_in_28:
@@ -3419,6 +3493,23 @@ output_debug:
         movlw   '\n'
         call    write_char
 
+        movlw   'B'
+        call    write_char
+
+        movlw   'I'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movlb   12
+        movfw   CNT_BINARY
+        movlb   0
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
         movlw   'T'
         call    write_char
 
@@ -3622,29 +3713,24 @@ init:
 ;;; Set up the variables along with the baud rate. This is called both
 ;;; at startup and after the interactive mode.
 init2:
-        movlw   TIMER_FAST_HIGH
+        movlw   TIMER_HIGH
         movwf   TIMER0H + FAST0_NUM
         movwf   TIMER0H + FAST1_NUM
         movwf   TIMER0H + FAST2_NUM
         movwf   TIMER0H + FAST3_NUM
-
-        movlw   TIMER_FAST_LOW
-        movwf   TIMER0L + FAST0_NUM
-        movwf   TIMER0L + FAST1_NUM
-        movwf   TIMER0L + FAST2_NUM
-        movwf   TIMER0L + FAST3_NUM
-
-        movlw   TIMER_SLOW_HIGH
         movwf   TIMER0H + SLOW0_NUM
         movwf   TIMER0H + SLOW1_NUM
         movwf   TIMER0H + SLOW2_NUM
         movwf   TIMER0H + SLOW3_NUM
 
-        movlw   TIMER_SLOW_LOW
-        movwf   TIMER0L + SLOW0_NUM
-        movwf   TIMER0L + SLOW1_NUM
-        movwf   TIMER0L + SLOW2_NUM
-        movwf   TIMER0L + SLOW3_NUM
+        clrf    TIMER0L + FAST0_NUM
+        clrf    TIMER0L + FAST1_NUM
+        clrf    TIMER0L + FAST2_NUM
+        clrf    TIMER0L + FAST3_NUM
+        clrf    TIMER0L + SLOW0_NUM
+        clrf    TIMER0L + SLOW1_NUM
+        clrf    TIMER0L + SLOW2_NUM
+        clrf    TIMER0L + SLOW3_NUM
 
         clrf    CH_RDY
         movlw   0xFF
@@ -3691,6 +3777,7 @@ init2:
         clrf    STUCK_CNT2
 
         clrf    CNT_SLOW
+        clrf    CNT_BINARY
 
         movlb   0
 
@@ -3815,6 +3902,275 @@ speed_115200:
         movlb   0
 
         return
+
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Convert a char that was read according to this:
+;;;
+;;;   - '\r' and '\n' becomes 0x00
+;;;
+;;;   - printable characters ('\t' and 0x20 to 0x7E) are unchanged
+;;;
+;;;   - non-printable characters become 0xFF
+convert_char:
+        brw
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x09             ; '\t', keep it is normal character
+        retlw  0x00             ; '\n'
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x00             ; '\r'
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x20
+        retlw  0x21
+        retlw  0x22
+        retlw  0x23
+        retlw  0x24
+        retlw  0x25
+        retlw  0x26
+        retlw  0x27
+        retlw  0x28
+        retlw  0x29
+        retlw  0x2A
+        retlw  0x2B
+        retlw  0x2C
+        retlw  0x2D
+        retlw  0x2E
+        retlw  0x2F
+        retlw  0x30
+        retlw  0x31
+        retlw  0x32
+        retlw  0x33
+        retlw  0x34
+        retlw  0x35
+        retlw  0x36
+        retlw  0x37
+        retlw  0x38
+        retlw  0x39
+        retlw  0x3A
+        retlw  0x3B
+        retlw  0x3C
+        retlw  0x3D
+        retlw  0x3E
+        retlw  0x3F
+        retlw  0x40
+        retlw  0x41
+        retlw  0x42
+        retlw  0x43
+        retlw  0x44
+        retlw  0x45
+        retlw  0x46
+        retlw  0x47
+        retlw  0x48
+        retlw  0x49
+        retlw  0x4A
+        retlw  0x4B
+        retlw  0x4C
+        retlw  0x4D
+        retlw  0x4E
+        retlw  0x4F
+        retlw  0x50
+        retlw  0x51
+        retlw  0x52
+        retlw  0x53
+        retlw  0x54
+        retlw  0x55
+        retlw  0x56
+        retlw  0x57
+        retlw  0x58
+        retlw  0x59
+        retlw  0x5A
+        retlw  0x5B
+        retlw  0x5C
+        retlw  0x5D
+        retlw  0x5E
+        retlw  0x5F
+        retlw  0x60
+        retlw  0x61
+        retlw  0x62
+        retlw  0x63
+        retlw  0x64
+        retlw  0x65
+        retlw  0x66
+        retlw  0x67
+        retlw  0x68
+        retlw  0x69
+        retlw  0x6A
+        retlw  0x6B
+        retlw  0x6C
+        retlw  0x6D
+        retlw  0x6E
+        retlw  0x6F
+        retlw  0x70
+        retlw  0x71
+        retlw  0x72
+        retlw  0x73
+        retlw  0x74
+        retlw  0x75
+        retlw  0x76
+        retlw  0x77
+        retlw  0x78
+        retlw  0x79
+        retlw  0x7A
+        retlw  0x7B
+        retlw  0x7C
+        retlw  0x7D
+        retlw  0x7E
+        retlw  0xFF             ; 0x7F and up is no good
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 ;;; Settings sections starts here.
