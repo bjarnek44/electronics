@@ -70,13 +70,13 @@
 ;;;     discarded and a period 3.3 ms of high input is awaited.
 ;;;
 ;;;   - A sentence has more than 80 characters: the sentence is
-;;; 	discarded.
+;;;     discarded.
 ;;;
 ;;;   - A sentence takes too long to receive: the sentence is
-;;; 	discarded.
+;;;     discarded.
 ;;;
 ;;;   - There is no free bank for a new sentence: the sentence is
-;;; 	discarded.
+;;;     discarded.
 ;;;
 ;;;
 ;;; Reading bits
@@ -260,7 +260,7 @@
 ;;;   awk 'BEGIN {t="m"} $2 == "code" {t = substr($1,1,1)} substr($1, length($1)) == ":" {s[substr($1, 1, length($1)-1)]=t} END {for (i in s) {print i, s[i]}}' nmea.asm > tmp.txt ; awk 'BEGIN {while (getline < "tmp.txt") {s[$1]=$2}} substr($0,1,1) == " " && substr($1, 3) == "call" && s[$2] != substr($1,2,1) {print "Error:", $1, $2, s[$2]; c = 1} END {if (c == 0) {print "No errors"}}' nmea.asm
 
 
-;; /////////////////////////////////////////////////////////////////////////////
+;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; Memory addresses for variables:
 
@@ -346,7 +346,7 @@ CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to b
 INPUT_CNTH      equ     0x64E           ; Counter for waiting for serial input (high part)
 INPUT_CNTL      equ     0x64F           ; Counter for waiting for serial input (low part)
 
-;; /////////////////////////////////////////////////////////////////////////////
+;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; Constants:
 
@@ -692,11 +692,11 @@ mv_char macro   channel
         movfw   SUPPRESS0 + channel
         andwf   CH_BUSY, W
         btfss   STATUS, Z
-        goto    discard2
+        goto    discard2        ; this channel is suppressed by a busy channel
 
         ;; 25 cycles to here
 
-        find_bk BK_FREEL, BK_FREEH, 1   ; 16 cycles, so 41 cycles to here
+        find_bk BK_FREEL, BK_FREEH, 1 ; 16 cycles, so 41 cycles to here
 
         movwf   BANK0 + channel ; BANK variable for channel set to chosen bank
 
@@ -775,7 +775,7 @@ finish:                         ; 22 cycles to here
         addlw   LOW(QUEUE)
         movwf   FSR0L           ; FSRH:L points to the element after the last in the queue
 
-        ;;      32 cycles to here
+        ;; 32 cycles to here
 
         movfw   BANK0 + channel
         movwf   INDF0           ; Put bank number in the queue
@@ -877,15 +877,7 @@ else
         call    send_check      ; 31 cycles, so 35 cycles to here
 endif
 
-        movfw   SUPPRESS0 + channel
-        andwf   CH_BUSY, W
-        btfss   STATUS, Z
-        bsf     TIMER0H + channel, 0 ; This channel is being suppressed, so indicate that it is not quiet.
-                                     ; This is done by make sure the timer is at least 256, so it will not go to
-                                     ; zero even if this code is missed a few times due to finish_bank_setup being called
-
-        nop
-        return                  ; 41 cycles to here
+        goto    freturn_in_6    ; 41 cycles to here
 
 finish_bank_setup:              ; 5 cycles to here
         btfsc   BANK0 + channel, 7
@@ -1451,10 +1443,10 @@ chk_time_invalid:               ; 10 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 48 cycles including call and return. Once every 2048 times, check
-;;; for a stuck bank, which is one that is not free and was not used
-;;; since last time or the round before. When such a bank is found, it
-;;; is freed on next call.
+;;; 48 cycles including call and return. Once every 16384 times (7
+;;; seconds), check for a stuck bank, which is one that is not free
+;;; and was not used since last time or the round before. When such a
+;;; bank is found, it is freed on next call.
 chk_new_msg:
         movlb   12
 
@@ -1640,7 +1632,8 @@ parse_f3:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; A goto to one of these is a delayed return.
+;;; A goto to one of these is a delayed return. "goto return_in_n" is
+;;; equivalent to n-1 nop instructions before a return.
 return_in_32:
         nop
 return_in_31:
@@ -1823,7 +1816,7 @@ send_check:
         subwf   Q_START, W
 
         btfsc   STATUS, Z
-        goto    freturn_in_23    ; Nothing is awaiting being sent, 28 cycles to here
+        goto    freturn_in_23   ; Nothing is awaiting being sent, 28 cycles to here
 
         movfw   Q_START
         addlw   LOW(QUEUE)
@@ -1839,7 +1832,7 @@ send_check:
         incf    Q_START, f
         bcf     Q_START, 4      ; start over at 16
 
-        goto    freturn_in_12    ; 28 cycles to here
+        goto    freturn_in_12   ; 28 cycles to here
 
 send_check_done:                ; 3 cycles to here
         call    send            ; 24 cycles, so 27 cycles to here
@@ -1862,11 +1855,11 @@ send:
         btfsc   SEND_BK, 6
         goto    send_setup
         btfsc   SEND_BK, 7
-        goto    freturn_in_16    ; 21 cycles to here
+        goto    freturn_in_16   ; 21 cycles to here
 
 do_send:                        ; 6 cycles to here
         btfsc   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_14    ; No room for next char, 21 cycles to here
+        goto    freturn_in_14   ; No room for next char, 21 cycles to here
 
         movfw   SEND_END
         subwf   FSR1L, W
@@ -3019,7 +3012,7 @@ inter_cmd_discard:
         incf    WREG, W
         movlw   '\n'            ; Set last char in case of error
         btfsc   STATUS, Z
-        goto    inter_error_just_read   ; Error binary char chosen
+        goto    inter_error_just_read ; Error binary char chosen
 
 discard_ok:
         movlw   HIGH(DISCARD_CHAR0)
