@@ -871,8 +871,7 @@ mv_char2        macro   channel, send2
 
 ;;; No continuation, so help out with sending
 if (send2)
-        nopm    18
-        call    send_char       ; 13 cycles, so 35 cycles to here
+        call    send_char       ; 31 cycles, so 35 cycles to here
 else
         call    send_check      ; 31 cycles, so 35 cycles to here
 endif
@@ -1786,14 +1785,31 @@ store_f3b:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 13 cycles including call and return. If needed, move a char from
+;;; 31 cycles including call and return. If needed, move a char from
 ;;; our own transmit queue to the built-in one.
 send_char:
+        nopm    8
+
         btfss   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_9    ; 10 cycles to here, no char to send
+        goto    freturn_in_19   ; 28 cycles to here, no char to send
 
         btfss   PIR1, TXIF
-        goto    freturn_in_7    ; 10 cycles to here, no room
+        goto    freturn_in_17   ; 28 cycles to here, no room
+
+        btfsc   T2CON, TMR2ON
+        btfsc   PIR1, TMR2IF
+        goto    send_char_ok    ; timer not running or has expired
+
+        goto    freturn_in_13   ; 28 cycles to here, timer running and not expired
+
+send_char_ok:                   ; 16 cycles to here
+        bcf     PIR1, TMR2IF
+        bcf     T2CON, TMR2ON
+
+        movfw   SEND_CHAR
+        sublw   '\n'
+        btfsc   STATUS, Z
+        bsf     T2CON, TMR2ON   ; start timer when newline
 
         movfw   SEND_CHAR
         bcf     SD_CH_FLAGS, SD_CH_BIT
@@ -1802,7 +1818,7 @@ send_char:
         movwf   TXREG
         movlb   0
 
-        return                  ; 10 cycles to here
+        return                  ; 28 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -3667,6 +3683,9 @@ init:
 
         bsf     T1CON, TMR1ON
 
+        movlw   0x82
+        movwf   PR2             ; Period for timer 2, used for breaks after sending newline
+
         return
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -3811,19 +3830,6 @@ init2:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; Set serial speed to 4,800 baud.
-speed_4800:
-        movlb   3
-        movlw   6
-        movwf   SP1BRGH
-        movlw   130
-        movwf   SP1BRGL         ; 4,799 baud
-        movlb   0
-
-        return
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
 ;;; Wait a little
 wait_100ms:
         movlw   0x04            ; Take a break of about 100 ms (clock is 32 MHz)
@@ -3842,6 +3848,22 @@ wait_100ms_lp:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
+;;; Set serial speed to 4,800 baud.
+speed_4800:
+        movlb   3
+        movlw   6
+        movwf   SP1BRGH
+        movlw   130
+        movwf   SP1BRGL         ; 4,799 baud
+        movlb   0
+
+        movlw   0x2B
+        movwf   T2CON           ; off, postscaler 6, prescaler 64 for 6240 us or 30 bits
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
 ;;; Set serial speed to 38,400 baud.
 speed_38400:
         movlb   3
@@ -3849,6 +3871,9 @@ speed_38400:
         movlw   207
         movwf   SP1BRGL         ; 38,462 baud
         movlb   0
+
+        movlw   0x12
+        movwf   T2CON           ; off, postscaler 3, prescaler 16 for 780 us or 30 bits
 
         return
 
@@ -3861,6 +3886,9 @@ speed_115200:
         movlw   68
         movwf   SP1BRGL         ; 115,942 baud
         movlb   0
+
+        movlw   0x02
+        movwf   T2CON           ; off, postscaler 1, prescaler 16 for 260 us or 30 bits
 
         return
 
