@@ -262,8 +262,8 @@
 ;;;   TODO: implement option for inverting output (for stand alone version)
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
-;;;   TODO: fix first character binary error
 ;;;   TODO: log channel for stuck banks
+;;;   TODO: count total number of messages
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -663,17 +663,17 @@ done:                           ; 8 cycles to here
 ;;; for a particular channel.
 mv_char macro   channel
 
-        local   discard3
-        local   discard2
+        local   discard_suppress
         local   store
+        local   no_store
+        local   discard_binary
         local   finish
         local   binary
-        local   binary_discard
+        local   discard_binary2
         local   finish_discard
         local   discard
         local   overflow
         local   done
-        local   done2
 
         btfss   CH_RDY, channel
         goto    done            ; no char is ready, so do nothing
@@ -687,19 +687,17 @@ mv_char macro   channel
         incfsz  BANK0 + channel, W
         goto    store           ; The bank is set, so store char appropriately
 
-        movfw   CHAR0 + channel
+        incfsz  CHAR0 + channel, W ; check for binary char
+        movfw   CHAR0 + channel ; check for '\r' or '\n'
+        btfss   STATUS, Z
+        subwf   DISCARD_CHAR0 + channel, W ; check for discard start char
         btfsc   STATUS, Z
-
-        goto    done2           ; char is '\r' or '\n' so don't store TODO: or binary
-
-        subwf   DISCARD_CHAR0 + channel, W
-        btfsc   STATUS, Z
-        goto    discard3        ; first char indicates that sentence should be discarded
+        goto    no_store
 
         movfw   SUPPRESS0 + channel
         andwf   CH_BUSY, W
         btfss   STATUS, Z
-        goto    discard2        ; this channel is suppressed by a busy channel
+        goto    discard_suppress ; this channel is suppressed by a busy channel
 
         ;; 25 cycles to here
 
@@ -711,10 +709,42 @@ mv_char macro   channel
 
         return                  ; 43 cycles to here
 
-discard3:                       ; 22 cycles to here
-        nopm    4
+no_store:                       ; 22 cycles to here
+        bcf     STATUS, C       ; No continuation later
 
-discard2:                       ; 26 cycles to here
+        movfw   CHAR0 + channel ; check for '\r' or '\n'
+        btfsc   STATUS, Z
+        goto    freturn_in_18   ; 43 cycles to here, nothing more to be done
+
+        incfsz  CHAR0 + channel, W ; check for binary char
+        btfsc   STATUS, Z
+        goto    discard_binary
+
+        ;; Discard due to suppression
+
+        movlw   DISCARD_BANK
+        movwf   BANK0 + channel ; BANK variable for channel set to discard
+
+        ;; Carry flag not set, so no continuation
+
+        goto    freturn_in_12   ; 43 cycles to here
+
+discard_binary:                 ; 30 cycles to here
+        movlb   12
+        incfsz  CNT_BINARY, W
+        movwf   CNT_BINARY
+        movlb   0
+
+        bsf     ERR_CHANNELS, channel
+
+        movlw   DISCARD_BANK
+        movwf   BANK0 + channel ; BANK variable for channel set to discard
+
+        ;; Carry flag not set, so no continuation
+
+        goto    freturn_in_6    ; 43 cycles to here
+
+discard_suppress:               ; 26 cycles to here
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; BANK variable for channel set to discard
 
@@ -804,7 +834,7 @@ binary:                         ; 26 cycles to here
         movfw   BANK0 + channel
         sublw   DISCARD_BANK
         btfsc   STATUS, Z
-        goto    binary_discard
+        goto    discard_binary2
 
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
 
@@ -819,8 +849,7 @@ binary:                         ; 26 cycles to here
 
         goto    freturn_in_6    ; 43 cycles to here
 
-
-binary_discard:                 ; 31 cycles to here
+discard_binary2:                ; 31 cycles to here
         bcf     STATUS, C       ; No continuation later
 
         goto    freturn_in_11   ; 43 cycles to here
@@ -864,11 +893,6 @@ done:                           ; 3 cycles to here
         movwf   BANK0 + channel ; Channel set to waiting
 
         goto    freturn_in_33   ; 43 cycles to here
-
-done2:                          ; 19 cycles to here
-        bcf     STATUS, C       ; No continuation later
-
-        goto    freturn_in_23   ; 43 cycles to here
 
         endm
 
