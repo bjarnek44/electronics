@@ -174,9 +174,9 @@
 ;;;             (for debug output).
 ;;;
 ;;;   chk_input: checks for input and goes to interactive mode when
-;;;              appropriate. Also adjusts suppression timers.
+;;;              appropriate.
 ;;;
-;;;   hdl_time: Adjust more suppression timers.
+;;;   hdl_time: steps suppression timers.
 ;;;
 ;;;   chk_new_msg: frees banks that are marked as being used but with
 ;;;                no new sentences being put in the bank.
@@ -272,7 +272,7 @@ CHAR0           equ     0x28            ; Finished chars for each channel
 BANK0           equ     0x30            ; Bank for each channel. 0xFF bank not found yet, DISCARD_BANK for discards
 SUPPRESS0       equ     0x38            ; Suppress masks. One for each channel
 TIMER0H         equ     0x40            ; Counters for busy channels, one for each channel
-TIMER0L         equ     0x48            ; And low part for each channel
+TIMERL          equ     0x48            ; And common low part
 DISCARD_CHAR0   equ     0x50            ; Start char to discard for each channel, 0 means no discard
 
 READF0          equ     0x58            ; Fast port data at time 0
@@ -387,8 +387,6 @@ BANK_MASKL      equ     0xFE            ; ... banks 1-7 in use
 
 FRAME_REC_CNT_S equ     0x10            ; Stop bits to read before recovering from frame error on slow ch
 FRAME_REC_CNT_F equ     0x80            ; Stop bits to read before recovering from frame error on fast ch
-
-TIMER_HIGH      equ     0xE8            ; Timer for suppression, around 2.5 s
 
 DISCARD_BANK    equ     12              ; Artifical unused bank number
 
@@ -629,32 +627,13 @@ done:                           ; 16 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 8 cycles. The timers count up and stop at zero. CH_BUSY is set
-;;; while counter is still running.
+;;; 4 cycles. Sets busy flag when timer is not saturated at 255.
 tm_step macro   channel
 
-        local   not_zero
-        local   done
-
-        movf    TIMER0H + channel, f
-        btfss   STATUS, Z
-        goto    not_zero
-
-        bcf     CH_BUSY, channel
-
-        nop
-        nop
-
-        goto    done
-
-not_zero:                       ; 4 cycles to here
-        incfsz  TIMER0L + channel, f
-        decf    TIMER0H + channel, f
-        incf    TIMER0H + channel, f
-
+        incfsz  TIMER0H + channel, W
+        movwf   TIMER0H + channel
+        incfsz  TIMER0H + channel, W
         bsf     CH_BUSY, channel
-
-done:                           ; 8 cycles to here
 
         endm
 
@@ -823,11 +802,12 @@ finish:                         ; 22 cycles to here
         movlw   0xFF
         movwf   BANK0 + channel ; Channel set to waiting
 
-        movlw   TIMER_HIGH      ; reset timer
-        movwf   TIMER0H + channel
-        clrf    TIMER0L + channel
+        clrf    TIMER0H + channel ; reset timer
 
         bcf     STATUS, C       ; No continuation later
+
+        nop
+        nop
 
         return                  ; 43 cycles to here
 
@@ -1414,13 +1394,8 @@ main:
 ;;; for channels 0-3.
 
 chk_input:
-        tm_step 0
-        tm_step 1
-        tm_step 2
-        tm_step 3               ; 32 cycles to here
-
         btfsc   CONFIG_PORT, CONFIG_PIN
-        goto    return_in_10    ; 43 cycles to here
+        goto    return_in_42    ; 43 cycles to here
 
         nvcall  interactive_start
 
@@ -1432,12 +1407,28 @@ chk_input:
 ;;; channels 4-7.
 
 hdl_time:
+        movlw   0xE8
+        incfsz  TIMERL, f
+        movlw   0x00
+        addwf   TIMERL, f
+
+        incfsz  TIMERL, W
+        goto    return_in_42
+
+        ;; This is done one in 24 times
+
+        clrf    CH_BUSY         ; will be set appropriately below
+
+        tm_step 0               ; 4 cycles each
+        tm_step 1
+        tm_step 2
+        tm_step 3
         tm_step 4
         tm_step 5
         tm_step 6
-        tm_step 7               ; 32 cycles to here
+        tm_step 7
 
-        goto    return_in_12    ; 44 cycles to here
+        goto    return_in_7     ; 44 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1708,6 +1699,20 @@ parse_f3:
 
 ;;; A goto to one of these is a delayed return. "goto return_in_n" is
 ;;; equivalent to n-1 nop instructions before a return.
+return_in_44:
+        nop
+return_in_43:
+        nop
+return_in_42:
+        nop
+return_in_41:
+        nop
+return_in_40:
+        nop
+return_in_97:
+        nop
+return_in_38:
+        nop
 return_in_37:
         nop
 return_in_36:
@@ -3947,24 +3952,16 @@ ch8_uart_receive:
 ;;; Set up the variables along with the baud rate. This is called both
 ;;; at startup and after the interactive mode.
 init2:
-        movlw   TIMER_HIGH
-        movwf   TIMER0H + FAST0_NUM
-        movwf   TIMER0H + FAST1_NUM
-        movwf   TIMER0H + FAST2_NUM
-        movwf   TIMER0H + FAST3_NUM
-        movwf   TIMER0H + SLOW0_NUM
-        movwf   TIMER0H + SLOW1_NUM
-        movwf   TIMER0H + SLOW2_NUM
-        movwf   TIMER0H + SLOW3_NUM
+        clrf    TIMER0H + FAST0_NUM
+        clrf    TIMER0H + FAST1_NUM
+        clrf    TIMER0H + FAST2_NUM
+        clrf    TIMER0H + FAST3_NUM
+        clrf    TIMER0H + SLOW0_NUM
+        clrf    TIMER0H + SLOW1_NUM
+        clrf    TIMER0H + SLOW2_NUM
+        clrf    TIMER0H + SLOW3_NUM
 
-        clrf    TIMER0L + FAST0_NUM
-        clrf    TIMER0L + FAST1_NUM
-        clrf    TIMER0L + FAST2_NUM
-        clrf    TIMER0L + FAST3_NUM
-        clrf    TIMER0L + SLOW0_NUM
-        clrf    TIMER0L + SLOW1_NUM
-        clrf    TIMER0L + SLOW2_NUM
-        clrf    TIMER0L + SLOW3_NUM
+        clrf    TIMERL
 
         clrf    CH_RDY
         movlw   0xFF
