@@ -318,7 +318,7 @@ TM2L            equ     0x7A            ; Maximum cycle count, low part
 TM3H            equ     0x7B            ; Temporary timer value, high part
 TM3L            equ     INTER_VALUE     ; Temporary timer value, low part (note reuse of memory)
 CNT_CONGEST     equ     0x7C            ; Counter for sentences dropped due to missing space
-CNT_LONG        equ     0x7D            ; Counter for sentences dropped due to being too long
+CNT_SLOW        equ     0x7D            ; Counter for sentences dropped due to taking too long
 CNT_FRAME       equ     0x7E            ; Counter for sentences dropped due to frame errors
 SEND_CHAR       equ     0x7F            ; Single char buffer for trasnmission
 
@@ -340,7 +340,7 @@ STUCK_BANK      equ     0x64A           ; A bank observed to be stuck (otherwise
 
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
-CNT_SLOW        equ     0x64C           ; Counter for sentences dropped due to taking too long
+CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
 CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
 
 INPUT_CNTH      equ     0x64E           ; Counter for waiting for serial input (high part)
@@ -590,16 +590,18 @@ check_1_3:                      ; 8 cycles to here
         goto    done
 
 no_free:                        ; 9 cycles to here
-        movlw   DISCARD_BANK
-
 if (count_fail)
-        incf    CNT_CONGEST, f
+        incfsz  CNT_CONGEST, W
+        movwf   CNT_CONGEST
 else
+        nop
         nop
 endif
 
+        movlw   DISCARD_BANK
+
         bcf     STATUS, C       ; Indicate that a bank was not found
-        nopm    2
+        nop
         goto    done
 
 check_8_11:                     ; 5 cycles to here
@@ -802,12 +804,13 @@ binary:                         ; 26 cycles to here
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
 
         movlb   12
-        incf    CNT_BINARY, f
+        incfsz  CNT_BINARY, W
+        movwf   CNT_BINARY
         movlb   0
 
         bsf     STATUS, C       ; set carry flag for continuation later
 
-        goto    freturn_in_8    ; 43 cycles to here
+        goto    freturn_in_7    ; 43 cycles to here
 
 
 binary_discard:                 ; 31 cycles to here
@@ -832,9 +835,13 @@ discard:                        ; 26 cycles to here
 overflow:                       ; 33 cycles to here
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
         bsf     STATUS, C       ; set carry flag for continuation later
-        incf    CNT_LONG, f
 
-        goto    freturn_in_7    ; 43 cycles to here
+        movlb   12
+        incfsz  CNT_LONG, W
+        movwf   CNT_LONG
+        movlb   0
+
+        goto    freturn_in_4    ; 43 cycles to here
 
 done:                           ; 3 cycles to here
         bcf     STATUS, C       ; No continuation later
@@ -1059,9 +1066,12 @@ else
         movlw   FRAME_REC_CNT_S
 endif
         movwf   BUILD0 + channel ; Counter for frame error recovery
-        incf    CNT_FRAME, f
+        incfsz  CNT_FRAME, W
+        movwf   CNT_FRAME
 
-        goto    return_in_3     ; 18 cycles to here
+        nop
+
+        return                  ; 18 cycles to here
 
 waiting:                        ; 5 cycles to here
         btfsc   PHASE, channel
@@ -1166,6 +1176,8 @@ start_lp:
         nvcall  init2
 
         nvcall  wait_100ms
+
+        nvcall  init3
 
 main:
         read1   READF0
@@ -1517,9 +1529,10 @@ chk_new_msg_stuck2:             ; 7 cycles to here
         movlw   DISCARD_BANK
         movwf   STUCK_BANK
 
-        movlb   12
-        incf    CNT_SLOW, f
         movlb   0
+
+        incfsz  CNT_SLOW, W
+        movwf   CNT_SLOW
 
         return                  ; 45 cycles to here
 
@@ -3409,84 +3422,6 @@ output_debug:
         movlw   '\n'
         call    write_char
 
-        movlw   'F'
-        call    write_char
-
-        movlw   'E'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movfw   CNT_FRAME
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-        movlw   'C'
-        call    write_char
-
-        movlw   'G'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movfw   CNT_CONGEST
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
-        movlw   'L'
-        call    write_char
-
-        movlw   'O'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movfw   CNT_LONG
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
-        movlw   'S'
-        call    write_char
-
-        movlw   'L'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movlb   12
-        movfw   CNT_SLOW
-        movlb   0
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
-        movlw   'B'
-        call    write_char
-
-        movlw   'I'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movlb   12
-        movfw   CNT_BINARY
-        movlb   0
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
         movlw   'T'
         call    write_char
 
@@ -3532,6 +3467,106 @@ output_debug:
         call    write_hex
 
         movfw   TM3L
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'M'
+        call    write_char
+
+        movlw   'D'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movlb   1
+        rlf     ADRESH          ; Carry flag set to highest A/D bit
+        movlb   0
+
+        movlw   'S'             ; Stand alone if > 4.096 V supply
+        btfsc   STATUS, C
+        movlw   'R'             ; <= 4.096 V: Raspberry Pi
+
+        call    write_char
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'F'
+        call    write_char
+
+        movlw   'E'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movfw   CNT_FRAME
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+        movlw   'C'
+        call    write_char
+
+        movlw   'G'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movfw   CNT_CONGEST
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'L'
+        call    write_char
+
+        movlw   'O'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movlb   12
+        movfw   CNT_LONG
+        movlb   0
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'S'
+        call    write_char
+
+        movlw   'L'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movfw   CNT_SLOW
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'B'
+        call    write_char
+
+        movlw   'I'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movlb   12
+        movfw   CNT_BINARY
+        movlb   0
         call    write_hex
 
         movlw   '\n'
@@ -3756,13 +3791,13 @@ init2:
         clrf    STUCK_CNT1
         clrf    STUCK_CNT2
 
-        clrf    CNT_SLOW
+        clrf    CNT_LONG
         clrf    CNT_BINARY
 
         movlb   0
 
         clrf    CNT_CONGEST
-        clrf    CNT_LONG
+        clrf    CNT_SLOW
         clrf    CNT_FRAME
 
         clrf    TM1H
@@ -3823,6 +3858,43 @@ init2:
         decf    WREG, W
         btfsc   STATUS, Z
         call    speed_115200
+
+        movlb   2
+
+        movlw   0x82
+        movwf   FVRCON          ; Enable fixed voltage reference, set to 2.048 V for A/D conversion
+
+        btfss   FVRCON, FVRRDY
+        goto    $-1             ; Wait for voltage reference to be ready
+
+        movlb   1
+
+        movlw   0x7D
+        movwf   ADCON0          ; A/D conversion on and set to fixed voltage reference
+
+        movlw   0x60
+        movwf   ADCON1          ; A/D conversion result left justified, clock Fosc/64, Vss and Vdd refs
+
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+init3:
+        movlb   1
+
+        bsf     ADCON0, GO_NOT_DONE
+        btfsc   ADCON0, GO_NOT_DONE
+        goto    $-1             ; Wait for A/D conversion to be done
+
+        movlw   0x00
+        movwf   ADCON0          ; Disable A/D conversion
+
+        movlb   2
+
+        movlw   0x00
+        movwf   FVRCON          ; Disable fixed voltage reference
 
         movlb   0
 
