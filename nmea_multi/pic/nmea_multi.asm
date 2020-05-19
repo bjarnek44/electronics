@@ -261,7 +261,7 @@
 
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
-;;;   TODO: count total number of messages
+;;;   TODO: channels for each error type
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -273,6 +273,8 @@ BANK0           equ     0x30            ; Bank for each channel. 0xFF bank not f
 SUPPRESS0       equ     0x38            ; Suppress masks. One for each channel
 TIMER0H         equ     0x40            ; Counters for busy channels, one for each channel
 TIMERL          equ     0x48            ; And common low part
+SEND_CNT_TMP    equ     0x4B            ; Counter for sent sentences to be transferred to main counter
+SEND_CNT        equ     0x4C            ; 4 byte counter for sent sentences
 DISCARD_CHAR0   equ     0x50            ; Start char to discard for each channel, 0 means no discard
 
 READF0          equ     0x58            ; Fast port data at time 0
@@ -806,7 +808,7 @@ finish:                         ; 22 cycles to here
 
         bcf     STATUS, C       ; No continuation later
 
-        nop
+        incf    SEND_CNT_TMP, f  ; Count sentence as sent
         nop
 
         return                  ; 43 cycles to here
@@ -1390,12 +1392,20 @@ main:
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; 46 cycles incuding call and return. Check for configuration signal
-;;; and go to interactive mode if low. Also adjust supression timers
+;;; and go to interactive mode if low. Also counts sent senctences.
 ;;; for channels 0-3.
 
 chk_input:
+        movfw   SEND_CNT_TMP
+        addwf   SEND_CNT + 3, f
+        movlw   0x00
+        addwfc  SEND_CNT + 2, f
+        addwfc  SEND_CNT + 1, f
+        addwfc  SEND_CNT + 0, f
+        clrf    SEND_CNT_TMP
+
         btfsc   CONFIG_PORT, CONFIG_PIN
-        goto    return_in_42    ; 43 cycles to here
+        goto    return_in_35    ; 43 cycles to here
 
         nvcall  interactive_start
 
@@ -1403,9 +1413,7 @@ chk_input:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 47 cycles incuding call and return. Adjust supression timers for
-;;; channels 4-7.
-
+;;; 47 cycles incuding call and return. Adjust supression timers.
 hdl_time:
         movlw   0xE8
         incfsz  TIMERL, f
@@ -3670,6 +3678,30 @@ output_debug:
         movlw   '\n'
         call    write_char
 
+        movlw   'S'
+        call    write_char
+
+        movlw   'E'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movfw   SEND_CNT
+        call    write_hex
+
+        movfw   SEND_CNT + 1
+        call    write_hex
+
+        movfw   SEND_CNT + 2
+        call    write_hex
+
+        movfw   SEND_CNT + 3
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
         movlw   'F'
         call    write_char
 
@@ -3684,6 +3716,7 @@ output_debug:
 
         movlw   '\n'
         call    write_char
+
         movlw   'C'
         call    write_char
 
@@ -3952,6 +3985,12 @@ ch8_uart_receive:
 ;;; Set up the variables along with the baud rate. This is called both
 ;;; at startup and after the interactive mode.
 init2:
+        clrf    SEND_CNT_TMP
+        clrf    SEND_CNT
+        clrf    SEND_CNT + 1
+        clrf    SEND_CNT + 2
+        clrf    SEND_CNT + 3
+
         clrf    TIMER0H + FAST0_NUM
         clrf    TIMER0H + FAST1_NUM
         clrf    TIMER0H + FAST2_NUM
