@@ -259,10 +259,8 @@
 ;;;
 ;;;   awk 'BEGIN {t="m"} $2 == "code" {t = substr($1,1,1)} substr($1, length($1)) == ":" {s[substr($1, 1, length($1)-1)]=t} END {for (i in s) {print i, s[i]}}' nmea.asm > tmp.txt ; awk 'BEGIN {while (getline < "tmp.txt") {s[$1]=$2}} substr($0,1,1) == " " && substr($1, 3) == "call" && s[$2] != substr($1,2,1) {print "Error:", $1, $2, s[$2]; c = 1} END {if (c == 0) {print "No errors"}}' nmea.asm
 
-;;;   TODO: implement option for inverting output (for stand alone version)
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
-;;;   TODO: log channel for stuck banks
 ;;;   TODO: count total number of messages
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -442,6 +440,7 @@ settings        macro
         retlw   0x0F            ; Fast channels
         retlw   0x01            ; Return newline
         retlw   0x00            ; Inverted input
+        retlw   0x00            ; Inverted output
         retlw   0x02            ; Speed
         retlw   0xFF            ; Schmitt triggers
 
@@ -2291,6 +2290,9 @@ load_settings:
         call    inter_set_invert
 
         moviw   FSR1++
+        call    inter_set_invert_out
+
+        moviw   FSR1++
         movlb   12
         movwf   INTER_SPEED
         movlb   0
@@ -2369,6 +2371,9 @@ save_user_settings:
         call    save_byte
 
         call    inter_get_invert
+        call    save_byte
+
+        call    inter_get_invert_out
         call    save_byte
 
         movlb   12
@@ -2517,6 +2522,34 @@ inter_set_invert:
 
         btfsc   WREG, FAST3_NUM
         bsf     INVERT_F, FAST3_PIN
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set W according to whether output is inverted.
+inter_get_invert_out:
+        movlb   3
+
+        movlw   0x00
+        btfsc   BAUD1CON, SCKP
+        movlw   0x01
+
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set output is inversion according to W.
+inter_set_invert_out:
+        movlb   3
+
+        bcf     BAUD1CON, SCKP
+        btfsc   WREG, 0
+        bsf     BAUD1CON, SCKP
+
+        movlb   0
 
         return
 
@@ -2676,7 +2709,11 @@ interactive_no_ok:
         btfsc   STATUS, Z
         goto    inter_cmd_invert
 
-        addlw   'I' - 'C'
+        addlw   'I' - 'J'
+        btfsc   STATUS, Z
+        goto    inter_cmd_invert_out
+
+        addlw   'J' - 'C'
         btfsc   STATUS, Z
         goto    inter_cmd_channel_output
 
@@ -3066,6 +3103,45 @@ inter_cmd_invert:
 
 ;;; //////////
 
+inter_cmd_invert_out:
+        bcf     STATUS, Z       ; Indicate that no error has occurred
+
+        movlw   1
+        call    read_num
+        movwf   INTER_VALUE
+
+        call    read_newline
+
+        btfsc   STATUS, Z
+        goto    inter_error_just_read
+
+        movfw   INTER_VALUE
+        call    inter_set_invert_out
+
+        call    wait_100ms
+
+        movlw   '\n'
+        call    write_char      ; Try to flush output after change
+
+        call    wait_100ms
+
+        movlw   '\n'
+        call    write_char      ; Try to flush output after change
+
+        call    wait_100ms
+
+        movlw   '\n'
+        call    write_char      ; Try to flush output after change
+
+        call    wait_100ms
+
+        movlw   '\n'
+        call    write_char      ; Try to flush output after change
+
+        goto    interactive
+
+;;; //////////
+
 inter_cmd_suppress:
         bcf     STATUS, Z       ; Indicate that no error has occurred
 
@@ -3187,6 +3263,8 @@ inter_cmd_output:
         call    inter_output_return_newline
 
         call    inter_output_invert
+
+        call    inter_output_invert_out
 
         movlw   0
         call    inter_output_suppress
@@ -3437,6 +3515,21 @@ inter_output_schmitt:
 
         call    inter_get_schmitt
         call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        return
+
+;;; //////////
+
+inter_output_invert_out:
+        movlw   'J'
+        call    write_char
+
+        call    inter_get_invert_out
+        addlw   '0'
+        call    write_char
 
         movlw   '\n'
         call    write_char
