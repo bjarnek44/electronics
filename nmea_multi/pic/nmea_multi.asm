@@ -263,6 +263,7 @@
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
 ;;;   TODO: channels for each error type
 ;;;   TODO: rearrange memory after removal of TIMERL for each channel
+;;;   TODO: rework counter and bank saving for stuck banks
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -273,7 +274,6 @@ CHAR0           equ     0x28            ; Finished chars for each channel
 BANK0           equ     0x30            ; Bank for each channel. 0xFF bank not found yet, DISCARD_BANK for discards
 SUPPRESS0       equ     0x38            ; Suppress masks. One for each channel
 TIMER0H         equ     0x40            ; Counters for busy channels, one for each channel
-TIMERL          equ     0x48            ; And common low part
 SEND_CNT_TMP    equ     0x4B            ; Counter for sent sentences to be transferred to main counter
 SEND_CNT        equ     0x4C            ; 4 byte counter for sent sentences
 DISCARD_CHAR0   equ     0x50            ; Start char to discard for each channel, 0 means no discard
@@ -327,7 +327,8 @@ CNT_CONGEST     equ     0x7C            ; Counter for sentences dropped due to m
 ERR_CHN_CONGEST equ     0x49            ; Bits indicating channels with congestion errors
 CNT_FRAME       equ     0x7D            ; Counter for sentences dropped due to frame errors
 ERR_CHN_FRAME   equ     0x4A            ; Bits indicating channels with frame errors
-ERR_CHANNELS    equ     0x7E            ; Bits indicating channels with errors
+CNT_BINARY      equ     0x48            ; Counter for sentences dropped due to being binary
+ERR_CHN_BINARY  equ     0x7E            ; Bits indicating channels with errors
 SEND_CHAR       equ     0x7F            ; Single char buffer for trasnmission
 
 ;;; These pointers point to the last 8 bits of the full address in the relevant bank
@@ -350,9 +351,9 @@ STUCK_BANK      equ     0x64A           ; A bank observed to be stuck, sometimes
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
 CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
-CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
+ERR_CHN_LONG    equ     0x64D           ; Bits indicating channels with too long sentences
 CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
-ERR_CHN_SLOW    equ     0x64F           ; Bits indicating channels with slow sentences
+ERR_CHN_SLOW    equ     0x64F           ; Bits indicating channels with too slow sentences
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -715,19 +716,17 @@ no_store:                       ; 22 cycles to here
         goto    freturn_in_12   ; 43 cycles to here
 
 discard_binary:                 ; 30 cycles to here
-        movlb   12
         incfsz  CNT_BINARY, W
         movwf   CNT_BINARY
-        movlb   0
 
-        bsf     ERR_CHANNELS, channel
+        bsf     ERR_CHN_BINARY, channel
 
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; BANK variable for channel set to discard
 
         ;; Carry flag not set, so no continuation
 
-        goto    freturn_in_6    ; 43 cycles to here
+        goto    freturn_in_8    ; 43 cycles to here
 
 discard_suppress:               ; 26 cycles to here
         movlw   DISCARD_BANK
@@ -824,16 +823,14 @@ binary:                         ; 26 cycles to here
 
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
 
-        movlb   12
         incfsz  CNT_BINARY, W
         movwf   CNT_BINARY
-        movlb   0
 
-        bsf     ERR_CHANNELS, channel
+        bsf     ERR_CHN_BINARY, channel
 
         bsf     STATUS, C       ; set carry flag for continuation later
 
-        goto    freturn_in_6    ; 43 cycles to here
+        goto    freturn_in_8    ; 43 cycles to here
 
 discard_binary2:                ; 31 cycles to here
         bcf     STATUS, C       ; No continuation later
@@ -861,9 +858,10 @@ overflow:                       ; 33 cycles to here
         movlb   12
         incfsz  CNT_LONG, W
         movwf   CNT_LONG
+
+        bsf     ERR_CHN_LONG, channel
         movlb   0
 
-        bsf     ERR_CHANNELS, channel
 
         goto    freturn_in_3    ; 43 cycles to here
 
@@ -1418,15 +1416,12 @@ chk_input:
 
 ;;; 47 cycles incuding call and return. Adjust supression timers.
 hdl_time:
-        movlw   0xE8
-        incfsz  TIMERL, f
-        movlw   0x00
-        addwf   TIMERL, f
+        btfss   PIR2, TMR4IF
+        goto    return_in_43    ; 44 cycles to here
 
-        incfsz  TIMERL, W
-        goto    return_in_39    ; 44 cycles to here
+        bcf     PIR2, TMR4IF
 
-        ;; This is done one in 24 times
+        ;; This is done around every 9.84 ms
 
         clrf    CH_BUSY         ; will be set appropriately below
 
@@ -1439,7 +1434,7 @@ hdl_time:
         tm_step 6
         tm_step 7
 
-        goto    return_in_5     ; 44 cycles to here
+        goto    return_in_8     ; 44 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -3776,6 +3771,20 @@ output_debug:
         movlb   0
         call    write_hex
 
+        movlw   ' '
+        call    write_char
+
+        movlw   '('
+        call    write_char
+
+        movlb   12
+        movfw   ERR_CHN_LONG
+        movlb   0
+        call    write_hex
+
+        movlw   ')'
+        call    write_char
+
         movlw   '\n'
         call    write_char
 
@@ -3819,25 +3828,20 @@ output_debug:
         movlw   ' '
         call    write_char
 
-        movlb   12
         movfw   CNT_BINARY
-        movlb   0
         call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
-        movlw   'E'
-        call    write_char
-
-        movlw   'C'
-        call    write_char
 
         movlw   ' '
         call    write_char
 
-        movfw   ERR_CHANNELS
+        movlw   '('
+        call    write_char
+
+        movfw   ERR_CHN_BINARY
         call    write_hex
+
+        movlw   ')'
+        call    write_char
 
         movlw   '\n'
         call    write_char
@@ -3984,6 +3988,14 @@ init:
         bsf     TX1STA, TXEN    ; Enable transmission
         bcf     TX1STA, SYNC    ; Asynchronous
 
+        movlb   8
+
+        movlw   0xF6
+        movwf   PR4             ; Period for timer 4, used for channel busy timer
+
+        movlw   0x27
+        movwf   T4CON           ; on, postscaler 5, prescaler 64 for about 9.84 ms = 2.5 s / 256
+
         movlb   29
 
         movlw   0x14
@@ -4044,8 +4056,6 @@ init2:
         clrf    TIMER0H + SLOW2_NUM
         clrf    TIMER0H + SLOW3_NUM
 
-        clrf    TIMERL
-
         clrf    CH_RDY
         movlw   0xFF
         movwf   WAITING
@@ -4091,7 +4101,7 @@ init2:
         clrf    STUCK_CNT2
 
         clrf    CNT_LONG
-        clrf    CNT_BINARY
+        clrf    ERR_CHN_LONG
         clrf    CNT_SLOW
         clrf    ERR_CHN_SLOW
 
@@ -4101,7 +4111,8 @@ init2:
         clrf    ERR_CHN_CONGEST
         clrf    CNT_FRAME
         clrf    ERR_CHN_FRAME
-        clrf    ERR_CHANNELS
+        clrf    CNT_BINARY
+        clrf    ERR_CHN_BINARY
 
         clrf    TM1H
         clrf    TM1L
