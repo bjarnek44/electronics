@@ -1421,7 +1421,7 @@ hdl_time:
         addwf   TIMERL, f
 
         incfsz  TIMERL, W
-        goto    return_in_42
+        goto    return_in_39    ; 44 cycles to here
 
         ;; This is done one in 24 times
 
@@ -1436,7 +1436,7 @@ hdl_time:
         tm_step 6
         tm_step 7
 
-        goto    return_in_7     ; 44 cycles to here
+        goto    return_in_5     ; 44 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1717,7 +1717,7 @@ return_in_41:
         nop
 return_in_40:
         nop
-return_in_97:
+return_in_39:
         nop
 return_in_38:
         nop
