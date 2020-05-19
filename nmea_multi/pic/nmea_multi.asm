@@ -259,6 +259,11 @@
 ;;;
 ;;;   awk 'BEGIN {t="m"} $2 == "code" {t = substr($1,1,1)} substr($1, length($1)) == ":" {s[substr($1, 1, length($1)-1)]=t} END {for (i in s) {print i, s[i]}}' nmea.asm > tmp.txt ; awk 'BEGIN {while (getline < "tmp.txt") {s[$1]=$2}} substr($0,1,1) == " " && substr($1, 3) == "call" && s[$2] != substr($1,2,1) {print "Error:", $1, $2, s[$2]; c = 1} END {if (c == 0) {print "No errors"}}' nmea.asm
 
+;;;   TODO: implement option for inverting output (for stand alone version)
+;;;   TODO: allow inverted input for configuration (for stand alone version)
+;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
+;;;   TODO: fix first character binary error
+;;;   TODO: log channel for stuck banks
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -318,8 +323,8 @@ TM2L            equ     0x7A            ; Maximum cycle count, low part
 TM3H            equ     0x7B            ; Temporary timer value, high part
 TM3L            equ     INTER_VALUE     ; Temporary timer value, low part (note reuse of memory)
 CNT_CONGEST     equ     0x7C            ; Counter for sentences dropped due to missing space
-CNT_SLOW        equ     0x7D            ; Counter for sentences dropped due to taking too long
-CNT_FRAME       equ     0x7E            ; Counter for sentences dropped due to frame errors
+CNT_FRAME       equ     0x7D            ; Counter for sentences dropped due to frame errors
+ERR_CHANNELS    equ     0x7E            ; Bits indicating channels with errors
 SEND_CHAR       equ     0x7F            ; Single char buffer for trasnmission
 
 ;;; These pointers point to the last 8 bits of the full address in the relevant bank
@@ -342,9 +347,7 @@ INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in in
 
 CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
 CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
-
-INPUT_CNTH      equ     0x64E           ; Counter for waiting for serial input (high part)
-INPUT_CNTL      equ     0x64F           ; Counter for waiting for serial input (low part)
+CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -552,7 +555,7 @@ read2   macro   adr
 
 ;;; 16 cycles. W is set to the lowest available bank number. Carry set
 ;;; if bank is found.
-find_bk macro   bk1, bk2, count_fail
+find_bk macro   bk1, bk2, channel
         local   check_4_7
         local   check_1_3
         local   no_free
@@ -590,10 +593,12 @@ check_1_3:                      ; 8 cycles to here
         goto    done
 
 no_free:                        ; 9 cycles to here
-if (count_fail)
+if (channel >= 0)
         incfsz  CNT_CONGEST, W
         movwf   CNT_CONGEST
+        bsf     ERR_CHANNELS, channel
 else
+        nop
         nop
         nop
 endif
@@ -601,7 +606,6 @@ endif
         movlw   DISCARD_BANK
 
         bcf     STATUS, C       ; Indicate that a bank was not found
-        nop
         goto    done
 
 check_8_11:                     ; 5 cycles to here
@@ -685,7 +689,8 @@ mv_char macro   channel
 
         movfw   CHAR0 + channel
         btfsc   STATUS, Z
-        goto    done2           ; char is '\r' or '\n' so don't store
+
+        goto    done2           ; char is '\r' or '\n' so don't store TODO: or binary
 
         subwf   DISCARD_CHAR0 + channel, W
         btfsc   STATUS, Z
@@ -698,7 +703,7 @@ mv_char macro   channel
 
         ;; 25 cycles to here
 
-        find_bk BK_FREEL, BK_FREEH, 1 ; 16 cycles, so 41 cycles to here
+        find_bk BK_FREEL, BK_FREEH, channel ; 16 cycles, so 41 cycles to here
 
         movwf   BANK0 + channel ; BANK variable for channel set to chosen bank
 
@@ -808,9 +813,11 @@ binary:                         ; 26 cycles to here
         movwf   CNT_BINARY
         movlb   0
 
+        bsf     ERR_CHANNELS, channel
+
         bsf     STATUS, C       ; set carry flag for continuation later
 
-        goto    freturn_in_7    ; 43 cycles to here
+        goto    freturn_in_6    ; 43 cycles to here
 
 
 binary_discard:                 ; 31 cycles to here
@@ -841,7 +848,9 @@ overflow:                       ; 33 cycles to here
         movwf   CNT_LONG
         movlb   0
 
-        goto    freturn_in_4    ; 43 cycles to here
+        bsf     ERR_CHANNELS, channel
+
+        goto    freturn_in_3    ; 43 cycles to here
 
 done:                           ; 3 cycles to here
         bcf     STATUS, C       ; No continuation later
@@ -1069,7 +1078,7 @@ endif
         incfsz  CNT_FRAME, W
         movwf   CNT_FRAME
 
-        nop
+        bsf     ERR_CHANNELS, channel
 
         return                  ; 18 cycles to here
 
@@ -1482,7 +1491,7 @@ chk_new_msg:
         xorlw   0xFF
         movwf   NEW_MSGHB       ; Set bit: not used last time or this time and not free
 
-        find_bk NEW_MSGLB, NEW_MSGHB, 0 ; 16 cycles, so 33 cycles to here
+        find_bk NEW_MSGLB, NEW_MSGHB, -1 ; 16 cycles, so 33 cycles to here
 
         movwf   STUCK_BANK
 
@@ -1519,6 +1528,8 @@ chk_new_msg_stuck2:             ; 7 cycles to here
         addwf   STUCK_BANK, W
         movwf   FSR0L           ; FSR0H:L now points to REF
 
+        ;; INDF0 is the channel number for the message
+
         movlw   LOW(BANK0)
         addwf   INDF0, W
         movwf   FSR1L
@@ -1529,10 +1540,10 @@ chk_new_msg_stuck2:             ; 7 cycles to here
         movlw   DISCARD_BANK
         movwf   STUCK_BANK
 
-        movlb   0
-
         incfsz  CNT_SLOW, W
         movwf   CNT_SLOW
+
+        movlb   0
 
         return                  ; 45 cycles to here
 
@@ -2565,8 +2576,6 @@ interactive_start:
         movlw   '\n'
         call    write_char
 
-        call    speed_4800
-
         call    wait_100ms
 
         movlw   '\n'            ; No return-newline in debug mode
@@ -2576,6 +2585,11 @@ interactive_start:
         call    write_char
 
         call    clear_input
+
+        call    speed_4800
+        movlb   3
+        bsf     RC1STA, CREN    ; Enable receive
+        movlb   0
 
         goto    interactive_no_ok
 
@@ -3212,6 +3226,10 @@ inter_cmd_debug:
 ;;; //////////
 
 inter_done:
+        movlb   3
+        bcf     RC1STA, CREN    ; Disable receive
+        movlb   0
+
         call    init2
 
         call    wait_100ms
@@ -3481,13 +3499,11 @@ output_debug:
         movlw   ' '
         call    write_char
 
-        movlb   1
-        rlf     ADRESH          ; Carry flag set to highest A/D bit
-        movlb   0
+        call    is_raspberry
 
-        movlw   'S'             ; Stand alone if > 4.096 V supply
+        movlw   'S'             ; Stand alone
         btfsc   STATUS, C
-        movlw   'R'             ; <= 4.096 V: Raspberry Pi
+        movlw   'R'             ; Raspberry Pi
 
         call    write_char
 
@@ -3549,7 +3565,9 @@ output_debug:
         movlw   ' '
         call    write_char
 
+        movlb   12
         movfw   CNT_SLOW
+        movlb   0
         call    write_hex
 
         movlw   '\n'
@@ -3567,6 +3585,21 @@ output_debug:
         movlb   12
         movfw   CNT_BINARY
         movlb   0
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   'E'
+        call    write_char
+
+        movlw   'C'
+        call    write_char
+
+        movlw   ' '
+        call    write_char
+
+        movfw   ERR_CHANNELS
         call    write_hex
 
         movlw   '\n'
@@ -3678,6 +3711,18 @@ output_debug:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
+;;; Set carry flag according to whether the board is run from a
+;;; Raspberry Pi (supply voltage <= 4.096 V, typically 3.3) or stand
+;;; alone (> 4.096 V, typically 5.0).
+is_raspberry:
+        movlb   1
+        rlf     ADRESH, W       ; Carry flag set to highest A/D bit
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
 ;;; Set up the PIC.
 init:
         movlb   1
@@ -3702,13 +3747,6 @@ init:
         bsf     TX1STA, TXEN    ; Enable transmission
         bcf     TX1STA, SYNC    ; Asynchronous
 
-        bsf     RC1STA, CREN
-
-        movlb   28
-
-        movlw   0x11
-        movwf   RXPPS           ; RC1 is UART receive
-
         movlb   29
 
         movlw   0x14
@@ -3720,6 +3758,32 @@ init:
 
         movlw   0x82
         movwf   PR2             ; Period for timer 2, used for breaks after sending newline
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set the UART receive to the standard pin
+std_uart_receive:
+        movlb   28
+
+        movlw   0x11
+        movwf   RXPPS           ; RC1 is UART receive
+
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set the UART receive to channel 8 (for standalone version of board)
+ch8_uart_receive:
+        movlb   28
+
+        movlw   0x12
+        movwf   RXPPS           ; RC2 is UART receive
+
+        movlb   0
 
         return
 
@@ -3793,12 +3857,13 @@ init2:
 
         clrf    CNT_LONG
         clrf    CNT_BINARY
+        clrf    CNT_SLOW
 
         movlb   0
 
         clrf    CNT_CONGEST
-        clrf    CNT_SLOW
         clrf    CNT_FRAME
+        clrf    ERR_CHANNELS
 
         clrf    TM1H
         clrf    TM1L
@@ -3834,18 +3899,15 @@ init2:
         movwf   REF0 + 10
         movwf   REF0 + 11
 
-        clrf    INPUT_CNTH
-        clrf    INPUT_CNTL
-
         movlb   3
 
         btfss   TX1STA, TRMT    ; Wait for trasmission to finish
         goto    $-1             ; before setting speed
 
-        movlb   0
-
         movlb   12
+
         movfw   INTER_SPEED
+
         movlb   0
 
         btfsc   STATUS, Z
@@ -3897,6 +3959,13 @@ init3:
         movwf   FVRCON          ; Disable fixed voltage reference
 
         movlb   0
+
+        call    is_raspberry
+
+        btfsc   STATUS, C
+        call    std_uart_receive ; For Raspberry Pi
+        btfss   STATUS, C
+        call    ch8_uart_receive ; For stand alone
 
         return
 
