@@ -349,6 +349,8 @@ CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to b
 CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
 CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
 
+STUCK_CHANNEL   equ     0x64F           ; For recording stuck channels as errors
+
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; Constants:
@@ -1490,16 +1492,17 @@ chk_time_invalid:               ; 10 cycles to here
 ;;; 48 cycles including call and return. Once every 16384 times (7
 ;;; seconds), check for a stuck bank, which is one that is not free
 ;;; and was not used since last time or the round before. When such a
-;;; bank is found, it is freed on next call.
+;;; bank is found, it is freed on the next call and recorded as an
+;;; error 255 calls later.
 chk_new_msg:
         movlb   12
 
         incfsz  STUCK_CNT1, f
-        goto    chk_new_msg_stuck1
+        goto    chk_new_msg_stuck
 
         incf    STUCK_CNT2, f
         btfss   STUCK_CNT2, 6
-        goto    chk_new_msg_stuck2
+        goto    chk_new_msg_record
 
         clrf    STUCK_CNT2
 
@@ -1534,10 +1537,9 @@ chk_new_msg:
         nop
         return                  ; 45 cycles to here
 
-chk_new_msg_stuck1:             ; 4 cycles to here
-        nopm    3
+chk_new_msg_stuck:              ; 4 cycles to here
+        nop                     ; to balance cycles for chk_new_msg_done
 
-chk_new_msg_stuck2:             ; 7 cycles to here
         movfw   STUCK_BANK
         sublw   DISCARD_BANK
 
@@ -1546,13 +1548,14 @@ chk_new_msg_stuck2:             ; 7 cycles to here
 
         movfw   STUCK_BANK
 
-        nfcall  free_bank       ; 18 cycles, so 30 cycles to here
+        nfcall  free_bank       ; 18 cycles, so 27 cycles to here
 
         movlw   LOW(REF0)
         addwf   STUCK_BANK, W
         movwf   FSR0L           ; FSR0H:L now points to REF
 
-        ;; INDF0 is the channel number for the message
+        movfw   INDF0
+        movwf   STUCK_CHANNEL
 
         movlw   LOW(BANK0)
         addwf   INDF0, W
@@ -1564,17 +1567,42 @@ chk_new_msg_stuck2:             ; 7 cycles to here
         movlw   DISCARD_BANK
         movwf   STUCK_BANK
 
+        movlb   0
+
+        goto    return_in_3     ; 45 cycles to here
+
+chk_new_msg_record:             ; 7 cycles to here
+        btfsc   STUCK_CHANNEL, 7
+        goto    chk_new_msg_done
+
+        movlw   0x01
+        btfsc   STUCK_CHANNEL, 1
+        movlw   0x04
+        btfsc   STUCK_CHANNEL, 0
+        lslf    WREG, f
+        btfsc   STUCK_CHANNEL, 2
+        swapf   WREG, f         ; W now has the appropriate bit set
+
+        movlb   0
+
+        iorwf   ERR_CHANNELS, f
+
+        movlb   12
+
         incfsz  CNT_SLOW, W
         movwf   CNT_SLOW
 
+        movlw   0xFF
+        movwf   STUCK_CHANNEL   ; mark as no error to be recorded
+
         movlb   0
 
-        return                  ; 45 cycles to here
+        goto    return_in_21    ; 45 cycles to here
 
-chk_new_msg_done:               ; 12 cycles to here
+chk_new_msg_done:               ; 10 cycles to here
         movlb   0
 
-        goto    return_in_32    ; 45 cycles to here
+        goto    return_in_34    ; 45 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1681,6 +1709,16 @@ parse_f3:
 
 ;;; A goto to one of these is a delayed return. "goto return_in_n" is
 ;;; equivalent to n-1 nop instructions before a return.
+return_in_37:
+        nop
+return_in_36:
+        nop
+return_in_35:
+        nop
+return_in_34:
+        nop
+return_in_33:
+        nop
 return_in_32:
         nop
 return_in_31:
@@ -3882,6 +3920,9 @@ init2:
         clrf    CNT_LONG
         clrf    CNT_BINARY
         clrf    CNT_SLOW
+
+        movlw   0xFF
+        movwf   STUCK_CHANNEL   ; no channel stuck now
 
         movlb   0
 
