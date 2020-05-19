@@ -262,6 +262,7 @@
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
 ;;;   TODO: channels for each error type
+;;;   TODO: rearrange memory after removal of TIMERL for each channel
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -323,7 +324,9 @@ TM2L            equ     0x7A            ; Maximum cycle count, low part
 TM3H            equ     0x7B            ; Temporary timer value, high part
 TM3L            equ     INTER_VALUE     ; Temporary timer value, low part (note reuse of memory)
 CNT_CONGEST     equ     0x7C            ; Counter for sentences dropped due to missing space
+ERR_CHN_CONGEST equ     0x49            ; Bits indicating channels with congestion errors
 CNT_FRAME       equ     0x7D            ; Counter for sentences dropped due to frame errors
+ERR_CHN_FRAME   equ     0x4A            ; Bits indicating channels with frame errors
 ERR_CHANNELS    equ     0x7E            ; Bits indicating channels with errors
 SEND_CHAR       equ     0x7F            ; Single char buffer for trasnmission
 
@@ -341,15 +344,15 @@ NEW_MSGLB       equ     0x647           ; Like NEW_MSGL, but last observed value
 
 STUCK_CNT1      equ     0x648           ; Counter for stuck channel checks, high part
 STUCK_CNT2      equ     0x649           ; Counter for stuck channel checks, low part
-STUCK_BANK      equ     0x64A           ; A bank observed to be stuck (otherwise DISCARD_BANK)
+STUCK_BANK      equ     0x64A           ; A bank observed to be stuck, sometimes a channel
+                                        ; number (if bit 6 set) (DISCARD_BANK if nothing)
 
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
 CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
 CNT_BINARY      equ     0x64D           ; Counter for sentences dropped due to being binary
 CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
-
-STUCK_CHANNEL   equ     0x64F           ; For recording stuck channels as errors
+ERR_CHN_SLOW    equ     0x64F           ; Bits indicating channels with slow sentences
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -597,7 +600,7 @@ no_free:                        ; 9 cycles to here
 if (channel >= 0)
         incfsz  CNT_CONGEST, W
         movwf   CNT_CONGEST
-        bsf     ERR_CHANNELS, channel
+        bsf     ERR_CHN_CONGEST, channel
 else
         nop
         nop
@@ -1085,7 +1088,7 @@ endif
         incfsz  CNT_FRAME, W
         movwf   CNT_FRAME
 
-        bsf     ERR_CHANNELS, channel
+        bsf     ERR_CHN_FRAME, channel
 
         return                  ; 18 cycles to here
 
@@ -1544,16 +1547,16 @@ chk_new_msg_stuck:              ; 4 cycles to here
         btfsc   STATUS, Z
         goto    chk_new_msg_done
 
+        btfsc   STUCK_BANK, 6   ; actually a channel number
+        goto    chk_new_msg_done2
+
         movfw   STUCK_BANK
 
-        nfcall  free_bank       ; 18 cycles, so 27 cycles to here
+        nfcall  free_bank       ; 18 cycles, so 30 cycles to here
 
         movlw   LOW(REF0)
         addwf   STUCK_BANK, W
         movwf   FSR0L           ; FSR0H:L now points to REF
-
-        movfw   INDF0
-        movwf   STUCK_CHANNEL
 
         movlw   LOW(BANK0)
         addwf   INDF0, W
@@ -1562,45 +1565,48 @@ chk_new_msg_stuck:              ; 4 cycles to here
         movlw   0xFF
         movwf   INDF1           ; Mark bank as unused
 
-        movlw   DISCARD_BANK
+        movfw   INDF0
         movwf   STUCK_BANK
+        bsf     STUCK_BANK, 6   ; Indicate that STUCK_BANK holds the channel number
 
         movlb   0
 
-        goto    return_in_3     ; 45 cycles to here
+        nop
+
+        return                  ; 45 cycles to here
 
 chk_new_msg_record:             ; 7 cycles to here
-        btfsc   STUCK_CHANNEL, 7
-        goto    chk_new_msg_done
+        btfss   STUCK_BANK, 6
+        goto    chk_new_msg_done ; not a stuck channel
 
         movlw   0x01
-        btfsc   STUCK_CHANNEL, 1
+        btfsc   STUCK_BANK, 1
         movlw   0x04
-        btfsc   STUCK_CHANNEL, 0
+        btfsc   STUCK_BANK, 0
         lslf    WREG, f
-        btfsc   STUCK_CHANNEL, 2
+        btfsc   STUCK_BANK, 2
         swapf   WREG, f         ; W now has the appropriate bit set
 
-        movlb   0
-
-        iorwf   ERR_CHANNELS, f
-
-        movlb   12
+        iorwf   ERR_CHN_SLOW, f
 
         incfsz  CNT_SLOW, W
         movwf   CNT_SLOW
 
-        movlw   0xFF
-        movwf   STUCK_CHANNEL   ; mark as no error to be recorded
+        movlw   DISCARD_BANK
+        movwf   STUCK_BANK     ; mark as no error to be recorded
 
         movlb   0
 
-        goto    return_in_21    ; 45 cycles to here
+        goto    return_in_23    ; 45 cycles to here
 
 chk_new_msg_done:               ; 10 cycles to here
+        nop
+        nop
+
+chk_new_msg_done2:              ; 12 cycles to here
         movlb   0
 
-        goto    return_in_34    ; 45 cycles to here
+        goto    return_in_32    ; 45 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -2233,7 +2239,7 @@ load_factory_settings:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; Load settings from FSR1æ
+;;; Load settings from FSR1
 load_settings:
         moviw   FSR1++
         movwf   SUPPRESS0 + 0
@@ -3714,6 +3720,18 @@ output_debug:
         movfw   CNT_FRAME
         call    write_hex
 
+        movlw   ' '
+        call    write_char
+
+        movlw   '('
+        call    write_char
+
+        movfw   ERR_CHN_FRAME
+        call    write_hex
+
+        movlw   ')'
+        call    write_char
+
         movlw   '\n'
         call    write_char
 
@@ -3728,6 +3746,18 @@ output_debug:
 
         movfw   CNT_CONGEST
         call    write_hex
+
+        movlw   ' '
+        call    write_char
+
+        movlw   '('
+        call    write_char
+
+        movfw   ERR_CHN_CONGEST
+        call    write_hex
+
+        movlw   ')'
+        call    write_char
 
         movlw   '\n'
         call    write_char
@@ -3762,6 +3792,20 @@ output_debug:
         movfw   CNT_SLOW
         movlb   0
         call    write_hex
+
+        movlw   ' '
+        call    write_char
+
+        movlw   '('
+        call    write_char
+
+        movlb   12
+        movfw   ERR_CHN_SLOW
+        movlb   0
+        call    write_hex
+
+        movlw   ')'
+        call    write_char
 
         movlw   '\n'
         call    write_char
@@ -4049,14 +4093,14 @@ init2:
         clrf    CNT_LONG
         clrf    CNT_BINARY
         clrf    CNT_SLOW
-
-        movlw   0xFF
-        movwf   STUCK_CHANNEL   ; no channel stuck now
+        clrf    ERR_CHN_SLOW
 
         movlb   0
 
         clrf    CNT_CONGEST
+        clrf    ERR_CHN_CONGEST
         clrf    CNT_FRAME
+        clrf    ERR_CHN_FRAME
         clrf    ERR_CHANNELS
 
         clrf    TM1H
