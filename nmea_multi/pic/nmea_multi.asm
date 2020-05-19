@@ -261,8 +261,6 @@
 
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
-;;;   TODO: channels for each error type
-;;;   TODO: rearrange memory after removal of TIMERL for each channel
 ;;;   TODO: rework counter and bank saving for stuck banks
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -274,60 +272,61 @@ CHAR0           equ     0x28            ; Finished chars for each channel
 BANK0           equ     0x30            ; Bank for each channel. 0xFF bank not found yet, DISCARD_BANK for discards
 SUPPRESS0       equ     0x38            ; Suppress masks. One for each channel
 TIMER0H         equ     0x40            ; Counters for busy channels, one for each channel
-SEND_CNT_TMP    equ     0x4B            ; Counter for sent sentences to be transferred to main counter
-SEND_CNT        equ     0x4C            ; 4 byte counter for sent sentences
-DISCARD_CHAR0   equ     0x50            ; Start char to discard for each channel, 0 means no discard
+DISCARD_CHAR0   equ     0x48            ; Start char to discard for each channel, 0 means no discard
 
-READF0          equ     0x58            ; Fast port data at time 0
-READF1          equ     0x59            ; Fast port data at time 1
-READF2          equ     0x5A            ; Fast port data at time 2
-READF3          equ     0x5B            ; Fast port data at time 3
-READS0          equ     0x5C            ; Slow port data at time 0
-READS1          equ     0x5D            ; Slow port data at time 1
-READS2          equ     0x5E            ; Slow port data at time 2
-READS3          equ     0x5F            ; Slow port data at time 3
-READFS0         equ     0x60            ; Fast port data at slow time 0
-READFS1         equ     0x61            ; Fast port data at slow time 1
-READFS2         equ     0x62            ; Fast port data at slow time 2
-READFS3         equ     0x63            ; Fast port data at slow time 3
+READF0          equ     0x50            ; Fast port data at time 0
+READF1          equ     0x51            ; Fast port data at time 1
+READF2          equ     0x52            ; Fast port data at time 2
+READF3          equ     0x53            ; Fast port data at time 3
+READS0          equ     0x54            ; Slow port data at time 0
+READS1          equ     0x55            ; Slow port data at time 1
+READS2          equ     0x56            ; Slow port data at time 2
+READS3          equ     0x57            ; Slow port data at time 3
+READFS0         equ     0x58            ; Fast port data at slow time 0
+READFS1         equ     0x59            ; Fast port data at slow time 1
+READFS2         equ     0x5A            ; Fast port data at slow time 2
+READFS3         equ     0x5B            ; Fast port data at slow time 3
 
-CH_RDY          equ     0x64            ; Flags for finished chars ready for each channel
-WAITING         equ     0x65            ; Whether we are waiting for data (a bit for each channel)
-PHASE           equ     0x66            ; Whether to read on round 1 (set) or 3 (not set) (a bit for each channel)
-DONE            equ     0x67            ; Whether we are done with a byte and reading the stop bit (a bit for each channel)
-SEND_BK         equ     0x68            ; Bank being sent from. 0x80: not sending, 0x4?: setting up, 0x0?: sending
-SEND_END        equ     0x69            ; End address for sending
-CH_BUSY         equ     0x6A            ; Flags for busy channels
-Q_START         equ     0x6B            ; Index of transmit bank queue start
-Q_END           equ     0x6C            ; Index of transmit bank queue end
-FLAGS           equ     0x6D            ; Various flags
+CH_RDY          equ     0x5C            ; Flags for finished chars ready for each channel
+WAITING         equ     0x5D            ; Whether we are waiting for data (a bit for each channel)
+PHASE           equ     0x5E            ; Whether to read on round 1 (set) or 3 (not set) (a bit for each channel)
+DONE            equ     0x5F            ; Whether we are done with a byte and reading the stop bit (a bit for each channel)
+SEND_BK         equ     0x60            ; Bank being sent from. 0x80: not sending, 0x4?: setting up, 0x0?: sending
+SEND_END        equ     0x61            ; End address for sending
+CH_BUSY         equ     0x62            ; Flags for busy channels
+Q_START         equ     0x63            ; Index of transmit bank queue start
+Q_END           equ     0x64            ; Index of transmit bank queue end
+FLAGS           equ     0x65            ; Various flags
 
-INVERT_F        equ     0x6E            ; Input on fast port is xor'ed with this
-INVERT_S        equ     0x6F            ; Input on slow port is xor'ed with this
+INVERT_F        equ     0x66            ; Input on fast port is xor'ed with this
+INVERT_S        equ     0x67            ; Input on slow port is xor'ed with this
 
-BK_FREEH        equ     0x70            ; Flags for banks being free, for high banks 8 - 15 (12 - 15 not used)
-BK_FREEL        equ     0x71            ; Flags for banks being free, for low banks 0 - 7 (0 not used)
+INTER_TMP       equ     0x68            ; Temporary storage used in interactive mode
+INTER_CHANNEL   equ     0x69            ; Channel number used in interactive mode
+INTER_VALUE     equ     0x6A            ; Command value number used in interactive mode
 
-INTER_TMP       equ     0x72            ; Temporary storage used in interactive mode
-INTER_CHANNEL   equ     0x73            ; Channel number used in interactive mode
-INTER_VALUE     equ     0x74            ; Command value number used in interactive mode
+SEND_CNT_TMP    equ     0x6B            ; Counter for sent sentences to be transferred to main counter
+SEND_CNT        equ     0x6C            ; 4 byte counter for sent sentences
 
-NEW_MSGH        equ     0x75            ; low part. Used for discarding slow inputs
-NEW_MSGL        equ     0x76            ; Banks which receive a new message, high part
+BK_FREEH        equ     0x70            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
+BK_FREEL        equ     0x71            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
+
+NEW_MSGH        equ     0x72            ; low part. Used for discarding slow inputs
+NEW_MSGL        equ     0x73            ; Banks which receive a new message, high part
 
 TM0H            equ     INTER_CHANNEL   ; Last timer value, high part (note reuse of memory)
 TM0L            equ     INTER_TMP       ; Last timer value, low part (note reuse of memory)
-TM1H            equ     0x77            ; Minimum cycle count, high part
-TM1L            equ     0x78            ; Minimum cycle count, low part
-TM2H            equ     0x79            ; Maximum cycle count, high part
-TM2L            equ     0x7A            ; Maximum cycle count, low part
-TM3H            equ     0x7B            ; Temporary timer value, high part
+TM1H            equ     0x74            ; Minimum cycle count, high part
+TM1L            equ     0x75            ; Minimum cycle count, low part
+TM2H            equ     0x76            ; Maximum cycle count, high part
+TM2L            equ     0x77            ; Maximum cycle count, low part
+TM3H            equ     0x78            ; Temporary timer value, high part
 TM3L            equ     INTER_VALUE     ; Temporary timer value, low part (note reuse of memory)
-CNT_CONGEST     equ     0x7C            ; Counter for sentences dropped due to missing space
-ERR_CHN_CONGEST equ     0x49            ; Bits indicating channels with congestion errors
-CNT_FRAME       equ     0x7D            ; Counter for sentences dropped due to frame errors
-ERR_CHN_FRAME   equ     0x4A            ; Bits indicating channels with frame errors
-CNT_BINARY      equ     0x48            ; Counter for sentences dropped due to being binary
+CNT_CONGEST     equ     0x79            ; Counter for sentences dropped due to missing space
+ERR_CHN_CONGEST equ     0x7A            ; Bits indicating channels with congestion errors
+CNT_FRAME       equ     0x7B            ; Counter for sentences dropped due to frame errors
+ERR_CHN_FRAME   equ     0x7C            ; Bits indicating channels with frame errors
+CNT_BINARY      equ     0x7D            ; Counter for sentences dropped due to being binary
 ERR_CHN_BINARY  equ     0x7E            ; Bits indicating channels with errors
 SEND_CHAR       equ     0x7F            ; Single char buffer for trasnmission
 
