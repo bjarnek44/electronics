@@ -311,9 +311,6 @@ SEND_CNT        equ     0x6C            ; 4 byte counter for sent sentences
 BK_FREEH        equ     0x70            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
 BK_FREEL        equ     0x71            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
 
-NEW_MSGH        equ     0x72            ; low part. Used for discarding slow inputs
-NEW_MSGL        equ     0x73            ; Banks which receive a new message, high part
-
 TM0H            equ     INTER_CHANNEL   ; Last timer value, high part (note reuse of memory)
 TM0L            equ     INTER_TMP       ; Last timer value, low part (note reuse of memory)
 TM1H            equ     0x74            ; Minimum cycle count, high part
@@ -339,20 +336,13 @@ REF0            equ     REF1 - 1        ; Just a reference, there is no bank 0
 
 QUEUE           equ     0x636           ; 16 bytes, circular buffer
 
-NEW_MSGHB       equ     0x646           ; Like NEW_MSGH, but last observed value
-NEW_MSGLB       equ     0x647           ; Like NEW_MSGL, but last observed value
-
-STUCK_CNT1      equ     0x648           ; Counter for stuck channel checks, high part
-STUCK_CNT2      equ     0x649           ; Counter for stuck channel checks, low part
-STUCK_BANK      equ     0x64A           ; A bank observed to be stuck, sometimes a channel
-                                        ; number (if bit 6 set) (DISCARD_BANK if nothing)
-
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
 CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
 ERR_CHN_LONG    equ     0x64D           ; Bits indicating channels with too long sentences
 CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
 ERR_CHN_SLOW    equ     0x64F           ; Bits indicating channels with too slow sentences
+
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -648,17 +638,17 @@ tm_step macro   channel
 ;;; for a particular channel.
 mv_char macro   channel
 
-        local   discard_suppress
-        local   store
         local   no_store
         local   discard_binary
+        local   discard_suppress
+        local   store
         local   finish
         local   binary
-        local   discard_binary2
         local   finish_discard
         local   discard
         local   overflow
         local   done
+        local   frame_err_no_bank
 
         btfss   CH_RDY, channel
         goto    done            ; no char is ready, so do nothing
@@ -709,6 +699,7 @@ no_store:                       ; 22 cycles to here
 
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; BANK variable for channel set to discard
+                                ; no bank freed since this is first char
 
         ;; Carry flag not set, so no continuation
 
@@ -722,6 +713,7 @@ discard_binary:                 ; 30 cycles to here
 
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; BANK variable for channel set to discard
+                                ; no bank freed since this is first char
 
         ;; Carry flag not set, so no continuation
 
@@ -730,6 +722,7 @@ discard_binary:                 ; 30 cycles to here
 discard_suppress:               ; 26 cycles to here
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; BANK variable for channel set to discard
+                                ; no bank freed since this is first char
 
         bcf     STATUS, C       ; No continuation later
 
@@ -809,7 +802,7 @@ finish:                         ; 22 cycles to here
 
         bcf     STATUS, C       ; No continuation later
 
-        incf    SEND_CNT_TMP, f  ; Count sentence as sent
+        incf    SEND_CNT_TMP, f ; Count sentence as sent
         nop
 
         return                  ; 43 cycles to here
@@ -817,8 +810,9 @@ finish:                         ; 22 cycles to here
 binary:                         ; 26 cycles to here
         movfw   BANK0 + channel
         sublw   DISCARD_BANK
+        bcf     STATUS, C       ; No continuation later
         btfsc   STATUS, Z
-        goto    discard_binary2
+        goto    freturn_in_13   ; 43 cycles to here
 
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
 
@@ -829,13 +823,7 @@ binary:                         ; 26 cycles to here
 
         bsf     STATUS, C       ; set carry flag for continuation later
 
-        goto    freturn_in_8    ; 43 cycles to here
-
-discard_binary2:                ; 31 cycles to here
-        bcf     STATUS, C       ; No continuation later
-
-        goto    freturn_in_11   ; 43 cycles to here
-
+        goto    freturn_in_7    ; 43 cycles to here
 
 finish_discard:                 ; 30 cycles to here
         movlw   0xFF
@@ -852,7 +840,6 @@ discard:                        ; 26 cycles to here
 
 overflow:                       ; 33 cycles to here
         bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
-        bsf     STATUS, C       ; set carry flag for continuation later
 
         movlb   12
         incfsz  CNT_LONG, W
@@ -861,6 +848,7 @@ overflow:                       ; 33 cycles to here
         bsf     ERR_CHN_LONG, channel
         movlb   0
 
+        bsf     STATUS, C       ; set carry flag for continuation later
 
         goto    freturn_in_3    ; 43 cycles to here
 
@@ -872,10 +860,31 @@ done:                           ; 3 cycles to here
         btfss   WREG, channel
         goto    freturn_in_36   ; 43 cycles to here
 
-        movlw   0xFF
-        movwf   BANK0 + channel ; Channel set to waiting
+        ;; Frame error:
 
-        goto    freturn_in_33   ; 43 cycles to here
+        movfw   BANK0 + channel
+        sublw   DISCARD_BANK
+        bcf     STATUS, C       ; No continuation later
+        btfsc   STATUS, Z
+        goto    freturn_in_31   ; 43 cycles to here, already discarding
+
+        incf    BANK0 + channel, W
+        btfsc   STATUS, Z
+        goto    frame_err_no_bank
+
+        bsf     BANK0 + channel, 7 ; Set bit 7 to indicate invalid data
+
+        bsf     STATUS, C       ; set carry flag for continuation later
+
+        goto    freturn_in_28    ; 43 cycles to here
+
+frame_err_no_bank:              ; 17 cycles to here
+        movlw   DISCARD_BANK
+        movwf   BANK0 + channel ; BANK variable for channel set to discard
+
+        bcf     STATUS, C       ; No continuation later
+
+        goto    freturn_in_23   ; 43 cycles to here
 
         endm
 
@@ -905,20 +914,13 @@ finish_bank_setup:              ; 5 cycles to here
         btfsc   BANK0 + channel, 7
         goto    invalid
 
-        movlw   0x01
+        movlw   0xFD            ; 11111101
         btfsc   BANK0 + channel, 1
-        movlw   0x04
-        btfsc   BANK0 + channel, 0
-        lslf    WREG, f
+        movlw   0xF7            ; 11110111
+        btfss   BANK0 + channel, 0
+        asrf    WREG, f         ; shift right if last bit is clear while preserving bit 7 as a one bit
         btfsc   BANK0 + channel, 2
         swapf   WREG, f
-
-        btfss   BANK0 + channel, 3
-        iorwf   NEW_MSGL, f
-        btfsc   BANK0 + channel, 3
-        iorwf   NEW_MSGH, f
-
-        xorlw   0xFF
 
         btfss   BANK0 + channel, 3
         andwf   BK_FREEL, f
@@ -947,9 +949,7 @@ finish_bank_setup:              ; 5 cycles to here
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
-        nop
-
-        return                  ; 41 cycles to here
+        goto    freturn_in_7    ; 41 cycles to here
 
 invalid:                        ; 8 cycles to here
         movfw   BANK0 + channel
@@ -1288,7 +1288,7 @@ main:
         call    parse_s2
         call    parse_s3
         read1   READF3
-        call    chk_new_msg
+        nopm    48
 
 ;;; Second round
 
@@ -1481,126 +1481,6 @@ chk_time_invalid:               ; 10 cycles to here
         movwf   TM0L
 
         goto    return_in_29    ; 44 cycles to here
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; 48 cycles including call and return. Once every 16384 times (7
-;;; seconds), check for a stuck bank, which is one that is not free
-;;; and was not used since last time or the round before. When such a
-;;; bank is found, it is freed on the next call and recorded as an
-;;; error 255 calls later.
-chk_new_msg:
-        movlb   12
-
-        incfsz  STUCK_CNT1, f
-        goto    chk_new_msg_stuck
-
-        incf    STUCK_CNT2, f
-        btfss   STUCK_CNT2, 6
-        goto    chk_new_msg_record
-
-        clrf    STUCK_CNT2
-
-        movfw   NEW_MSGL
-        iorwf   BK_FREEL, W
-        iorwf   NEW_MSGLB, W
-        xorlw   0xFF
-        movwf   NEW_MSGLB       ; Set bit: not used last time or this time and not free
-
-        movfw   NEW_MSGH
-        iorwf   BK_FREEH, W
-        iorwf   NEW_MSGHB, W
-        xorlw   0xFF
-        movwf   NEW_MSGHB       ; Set bit: not used last time or this time and not free
-
-        find_bk NEW_MSGLB, NEW_MSGHB, -1 ; 16 cycles, so 33 cycles to here
-
-        movwf   STUCK_BANK
-
-        movfw   NEW_MSGL
-        movwf   NEW_MSGLB
-        movlw   ~BANK_MASKL
-        movwf   NEW_MSGL
-
-        movfw   NEW_MSGH
-        movwf   NEW_MSGHB
-        movlw   ~BANK_MASKH
-        movwf   NEW_MSGH
-
-        movlb   0
-
-        nop
-        return                  ; 45 cycles to here
-
-chk_new_msg_stuck:              ; 4 cycles to here
-        nop                     ; to balance cycles for chk_new_msg_done
-
-        movfw   STUCK_BANK
-        sublw   DISCARD_BANK
-
-        btfsc   STATUS, Z
-        goto    chk_new_msg_done
-
-        btfsc   STUCK_BANK, 6   ; actually a channel number
-        goto    chk_new_msg_done2
-
-        movfw   STUCK_BANK
-
-        nfcall  free_bank       ; 18 cycles, so 30 cycles to here
-
-        movlw   LOW(REF0)
-        addwf   STUCK_BANK, W
-        movwf   FSR0L           ; FSR0H:L now points to REF
-
-        movlw   LOW(BANK0)
-        addwf   INDF0, W
-        movwf   FSR1L
-        clrf    FSR1H           ; FSR1H:L now points to BANK
-        movlw   0xFF
-        movwf   INDF1           ; Mark bank as unused
-
-        movfw   INDF0
-        movwf   STUCK_BANK
-        bsf     STUCK_BANK, 6   ; Indicate that STUCK_BANK holds the channel number
-
-        movlb   0
-
-        nop
-
-        return                  ; 45 cycles to here
-
-chk_new_msg_record:             ; 7 cycles to here
-        btfss   STUCK_BANK, 6
-        goto    chk_new_msg_done ; not a stuck channel
-
-        movlw   0x01
-        btfsc   STUCK_BANK, 1
-        movlw   0x04
-        btfsc   STUCK_BANK, 0
-        lslf    WREG, f
-        btfsc   STUCK_BANK, 2
-        swapf   WREG, f         ; W now has the appropriate bit set
-
-        iorwf   ERR_CHN_SLOW, f
-
-        incfsz  CNT_SLOW, W
-        movwf   CNT_SLOW
-
-        movlw   DISCARD_BANK
-        movwf   STUCK_BANK     ; mark as no error to be recorded
-
-        movlb   0
-
-        goto    return_in_23    ; 45 cycles to here
-
-chk_new_msg_done:               ; 10 cycles to here
-        nop
-        nop
-
-chk_new_msg_done2:              ; 12 cycles to here
-        movlb   0
-
-        goto    return_in_32    ; 45 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -3845,49 +3725,9 @@ output_debug:
         movlw   '\n'
         call    write_char
 
-        return
+;;;         return TODO
 
 ;;; This is extra debug info that is not generally needed:
-        movlw   'U'
-        call    write_char
-
-        movlw   'A'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movfw   NEW_MSGH
-        call    write_hex
-
-        movfw   NEW_MSGL
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
-        movlw   'U'
-        call    write_char
-
-        movlw   'B'
-        call    write_char
-
-        movlw   ' '
-        call    write_char
-
-        movlb   12
-        movfw   NEW_MSGHB
-        movlb   0
-        call    write_hex
-
-        movlb   12
-        movfw   NEW_MSGLB
-        movlb   0
-        call    write_hex
-
-        movlw   '\n'
-        call    write_char
-
         movlw   'F'
         call    write_char
 
@@ -3919,6 +3759,38 @@ output_debug:
 
         moviw   FSR1--
         call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        moviw   FSR1--
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        movlw   LOW(BANK0) + 7
+        movwf   FSR1L
+        movlw   HIGH(BANK0)
+        movwf   FSR1H
 
         moviw   FSR1--
         call    write_hex
@@ -4088,16 +3960,6 @@ init2:
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
         movlb   12
-
-        movlw   0xFF
-        movwf   NEW_MSGL
-        movwf   NEW_MSGH
-        movwf   NEW_MSGLB
-        movwf   NEW_MSGHB
-        movlw   DISCARD_BANK
-        movwf   STUCK_BANK
-        clrf    STUCK_CNT1
-        clrf    STUCK_CNT2
 
         clrf    CNT_LONG
         clrf    ERR_CHN_LONG
