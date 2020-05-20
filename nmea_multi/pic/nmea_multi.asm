@@ -178,11 +178,13 @@
 ;;;
 ;;;   hdl_time: steps suppression timers.
 ;;;
-;;;   chk_slow: checks for slow messages and frees banks and channels
+;;;   chk_stuck: checks for messages that stopped before a return or
+;;;              newline. Relevant banks and channels are freed.
 ;;;
 ;;; The last check handles the situation where a transmitter stops mid
-;;; sentence. In this case, the sentence is dropped after 7-14
-;;; seconds and the bank is freed.
+;;; sentence, for example when disconnected or turned off. In this
+;;; case, the sentence is dropped after 7-14 seconds and the bank is
+;;; freed.
 ;;;
 ;;; nop instructions are inserted where needed to ensure 52 cycles
 ;;; between read operations. Four extra nop instructions along with
@@ -199,7 +201,7 @@
 ;;;    * R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g2  S_s0a       R_f3/s2  S_s0b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     S_s1a       R_f3     S_s1b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g3  P_s0  P_s1  R_f3/s3  chk_time
-;;;  __* R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     chk_slow    ___
+;;;  __* R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     chk_stuck   ___
 ;;;      R_f0  P_f0/g0 P_f1/g1  R_f1  P_f2/g2 P_f3/g3  R_f2/g0  S_f0a       R_f3/s0  S_f0b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     S_f1a       R_f3     S_f1b
 ;;;    * R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g1  S_f2a       R_f3/s1  S_f2b
@@ -260,7 +262,6 @@
 
 ;;;   TODO: allow inverted input for configuration (for stand alone version)
 ;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
-;;;   TODO: rework counter and bank saving for stuck banks
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -307,8 +308,8 @@ INTER_VALUE     equ     0x6A            ; Command value number used in interacti
 SEND_CNT_TMP    equ     0x6B            ; Counter for sent sentences to be transferred to main counter
 
 ACTIVE          equ     0x6C            ; Active channels
-SLOW_MODE1      equ     0x6D            ; Low part of counter for slow sentences, and related
-SLOW_MODE2      equ     0x6E            ; High part of counter for slow sentences, and related
+STUCK_MODE1     equ     0x6D            ; Low part of counter for stuck sentences, and related
+STUCK_MODE2     equ     0x6E            ; High part of counter for stuck sentences, and related
 
 BK_FREEH        equ     0x70            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
 BK_FREEL        equ     0x71            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
@@ -344,8 +345,8 @@ INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in in
 
 CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to being too long
 ERR_CHN_LONG    equ     0x64D           ; Bits indicating channels with too long sentences
-CNT_SLOW        equ     0x64E           ; Counter for sentences dropped due to taking too long
-ERR_CHN_SLOW    equ     0x64F           ; Bits indicating channels with too slow sentences
+CNT_STUCK       equ     0x64E           ; Counter for sentences dropped due to taking too long
+ERR_CHN_STUCK   equ     0x64F           ; Bits indicating channels with too slow sentences
 
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -1294,7 +1295,7 @@ main:
         call    parse_s2
         call    parse_s3
         read1   READF3
-        call    chk_slow
+        call    chk_stuck
 
 ;;; Second round
 
@@ -1500,36 +1501,36 @@ chk_time_invalid:               ; 10 cycles to here
 ;;; channels with no activity since last check and free channel and
 ;;; bank if held.
 ;;;
-;;; SLOW_MODE2:1 has these meanings
+;;; STUCK_MODE2:1 has these meanings
 ;;;
 ;;;   00xxxxxx xxxxxxxx     waiting, x >= 8 is counter
-;;;   01000000 00000xxx     checking for slow channel, x is channel number
-chk_slow:
-        incfsz  SLOW_MODE1, f
-        decf    SLOW_MODE2, f
-        incf    SLOW_MODE2, f
+;;;   01000000 00000xxx     checking for stuck channel, x is channel number
+chk_stuck:
+        incfsz  STUCK_MODE1, f
+        decf    STUCK_MODE2, f
+        incf    STUCK_MODE2, f
 
-        btfss   SLOW_MODE2, 6
+        btfss   STUCK_MODE2, 6
         goto    return_in_41    ; 45 cycles to here
 
-        btfsc   SLOW_MODE1, 3
-        goto    chk_slow_reset
+        btfsc   STUCK_MODE1, 3
+        goto    chk_stuck_reset
 
         ;; 7 cycles to here
 
         clrf    FSR0H
-        movfw   SLOW_MODE1
+        movfw   STUCK_MODE1
         addlw   LOW(BANK0)
         movwf   FSR0L           ; FSR0H:L points to bank for channel
 
         incf    INDF0, W
         btfsc   STATUS, Z
-        goto    chk_slow_done   ; Channel already waiting
+        goto    chk_stuck_done   ; Channel already waiting
 
         movfw   INDF0
         sublw   DISCARD_BANK
         btfsc   STATUS, Z
-        goto    chk_slow_done2  ; Channel already discarding
+        goto    chk_stuck_done2  ; Channel already discarding
 
         ;; 18 cycles to here
 
@@ -1537,11 +1538,11 @@ chk_slow:
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
         movlw   0x01
-        btfsc   SLOW_MODE1, 1
+        btfsc   STUCK_MODE1, 1
         movlw   0x04
-        btfsc   SLOW_MODE1, 0
+        btfsc   STUCK_MODE1, 0
         lslf    WREG, f
-        btfsc   SLOW_MODE1, 2
+        btfsc   STUCK_MODE1, 2
         swapf   WREG, f
 
         movwf   FSR0L           ; FSR0 not used for anything else
@@ -1552,31 +1553,31 @@ chk_slow:
         btfss   STATUS, Z
         goto    return_in_15    ; 45 cycles to here, channel active, so do nothing
 
-        ;; The channel is slow, fix it
+        ;; The channel is stuck, fix it
 
         movfw   FSR0L           ; FSR0L is the channel bit
         iorwf   WAITING, f
         iorwf   PHASE, f        ; This indicates a frame error, which will clean up channel
 
         movlb   12
-        iorwf   ERR_CHN_SLOW, f
+        iorwf   ERR_CHN_STUCK, f
 
-        incfsz  CNT_SLOW, W
-        movwf   CNT_SLOW
+        incfsz  CNT_STUCK, W
+        movwf   CNT_STUCK
         movlb   0
 
         goto    return_in_6     ; 45 cycles to here
 
-chk_slow_reset:                 ; 8 cycles to here
+chk_stuck_reset:                 ; 8 cycles to here
         clrf    ACTIVE
-        clrf    SLOW_MODE2
+        clrf    STUCK_MODE2
 
         goto    return_in_35    ; 45 cycles to here
 
-chk_slow_done:                  ; 15 cycles to here
+chk_stuck_done:                  ; 15 cycles to here
         nopm    4
 
-chk_slow_done2:                 ; 19 cycles to here
+chk_stuck_done2:                 ; 19 cycles to here
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
@@ -4047,14 +4048,14 @@ output_debug:
         movlw   'S'
         call    write_char
 
-        movlw   'L'
+        movlw   'T'
         call    write_char
 
         movlw   ' '
         call    write_char
 
         movlb   12
-        movfw   CNT_SLOW
+        movfw   CNT_STUCK
         movlb   0
         call    write_hex
 
@@ -4065,7 +4066,7 @@ output_debug:
         call    write_char
 
         movlb   12
-        movfw   ERR_CHN_SLOW
+        movfw   ERR_CHN_STUCK
         movlb   0
         call    write_hex
 
@@ -4341,16 +4342,16 @@ init2:
 
         clrf    CNT_LONG
         clrf    ERR_CHN_LONG
-        clrf    CNT_SLOW
-        clrf    ERR_CHN_SLOW
+        clrf    CNT_STUCK
+        clrf    ERR_CHN_STUCK
 
         movlb   0
 
         clrf    ACTIVE
 
-        clrf    SLOW_MODE2
+        clrf    STUCK_MODE2
         movlw   0x08
-        movwf   SLOW_MODE1      ; start at 0x0008
+        movwf   STUCK_MODE1     ; start at 0x0008
 
         clrf    CNT_CONGEST
         clrf    ERR_CHN_CONGEST
