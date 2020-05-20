@@ -178,11 +178,10 @@
 ;;;
 ;;;   hdl_time: steps suppression timers.
 ;;;
-;;;   chk_new_msg: frees banks that are marked as being used but with
-;;;                no new sentences being put in the bank.
+;;;   chk_slow: checks for slow messages and frees banks and channels
 ;;;
 ;;; The last check handles the situation where a transmitter stops mid
-;;; sentence. In this case, the sentence is dropped after about 15
+;;; sentence. In this case, the sentence is dropped after 7-14
 ;;; seconds and the bank is freed.
 ;;;
 ;;; nop instructions are inserted where needed to ensure 52 cycles
@@ -200,7 +199,7 @@
 ;;;    * R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g2  S_s0a       R_f3/s2  S_s0b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     S_s1a       R_f3     S_s1b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g3  P_s0  P_s1  R_f3/s3  chk_time
-;;;  __* R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     chk_new_msg ___
+;;;  __* R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     P_s2  P_s3  R_f3     chk_slow    ___
 ;;;      R_f0  P_f0/g0 P_f1/g1  R_f1  P_f2/g2 P_f3/g3  R_f2/g0  S_f0a       R_f3/s0  S_f0b
 ;;;      R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2     S_f1a       R_f3     S_f1b
 ;;;    * R_f0  P_f0    P_f1     R_f1  P_f2    P_f3     R_f2/g1  S_f2a       R_f3/s1  S_f2b
@@ -306,7 +305,10 @@ INTER_CHANNEL   equ     0x69            ; Channel number used in interactive mod
 INTER_VALUE     equ     0x6A            ; Command value number used in interactive mode
 
 SEND_CNT_TMP    equ     0x6B            ; Counter for sent sentences to be transferred to main counter
-SEND_CNT        equ     0x6C            ; 4 byte counter for sent sentences
+
+ACTIVE          equ     0x6C            ; Active channels
+SLOW_MODE1      equ     0x6D            ; Low part of counter for slow sentences, and related
+SLOW_MODE2      equ     0x6E            ; High part of counter for slow sentences, and related
 
 BK_FREEH        equ     0x70            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
 BK_FREEL        equ     0x71            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
@@ -335,6 +337,8 @@ REF1            equ     0x62B           ; Channel number for bank
 REF0            equ     REF1 - 1        ; Just a reference, there is no bank 0
 
 QUEUE           equ     0x636           ; 16 bytes, circular buffer
+
+SEND_CNT        equ     0x646           ; 4 byte counter for sent sentences
 
 INTER_SPEED     equ     0x64B           ; The transmit baud rate (0-2) set in interactive mode
 
@@ -494,14 +498,14 @@ errorlevel      +306
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; For calling code in the veryfar segment from the far segment.
-fvcall  macro   label
+;;; For calling code in the far segment from the veryfar segment.
+vfcall  macro   label
 
-        movlp   0x10
+        movlp   0x08
 errorlevel      -306
         call    label
 errorlevel      +306
-        movlp   0x08
+        movlp   0x10
 
         endm
 
@@ -653,11 +657,13 @@ mv_char macro   channel
         btfss   CH_RDY, channel
         goto    done            ; no char is ready, so do nothing
 
+        nop
+        bsf     ACTIVE, channel
         bcf     CH_RDY, channel
 
         movfw   CHAR0 + channel
-        fvcall  convert_char    ; 8 cycles
-        movwf   CHAR0 + channel ; 13 cycles to here
+        call    convert_char    ; 6 cycles
+        movwf   CHAR0 + channel ; 12 cycles to here
 
         incfsz  BANK0 + channel, W
         goto    store           ; The bank is set, so store char appropriately
@@ -876,7 +882,7 @@ done:                           ; 3 cycles to here
 
         bsf     STATUS, C       ; set carry flag for continuation later
 
-        goto    freturn_in_28    ; 43 cycles to here
+        goto    freturn_in_25   ; 43 cycles to here
 
 frame_err_no_bank:              ; 17 cycles to here
         movlw   DISCARD_BANK
@@ -908,7 +914,7 @@ else
         call    send_check      ; 31 cycles, so 35 cycles to here
 endif
 
-        goto    freturn_in_6    ; 41 cycles to here
+        goto    vreturn_in_6    ; 41 cycles to here
 
 finish_bank_setup:              ; 5 cycles to here
         btfsc   BANK0 + channel, 7
@@ -949,7 +955,7 @@ finish_bank_setup:              ; 5 cycles to here
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
-        goto    freturn_in_7    ; 41 cycles to here
+        goto    vreturn_in_7    ; 41 cycles to here
 
 invalid:                        ; 8 cycles to here
         movfw   BANK0 + channel
@@ -958,7 +964,7 @@ invalid:                        ; 8 cycles to here
         movlw   DISCARD_BANK
         movwf   BANK0 + channel ; Discard further data
 
-        goto    freturn_in_14   ; 41 cycles to here
+        goto    vreturn_in_14   ; 41 cycles to here
 
         endm
 
@@ -1205,7 +1211,7 @@ main:
         read1fs READFS0
         nfcall  store_f0a
         read2   READS0
-        nfcall  store_f0b
+        nvcall  store_f0b
 
         read1   READF0
         call    parse_f0
@@ -1217,7 +1223,7 @@ main:
         nfcall  store_f1a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_f1b
+        nvcall  store_f1b
 
         read1   READF0
         call    parse_f0
@@ -1228,7 +1234,7 @@ main:
         read1fs READFS1
         nfcall  store_f2a
         read2   READS1
-        nfcall  store_f2b
+        nvcall  store_f2b
 
         read1   READF0
         call    parse_f0
@@ -1240,7 +1246,7 @@ main:
         nfcall  store_f3a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_f3b
+        nvcall  store_f3b
         nop                     ; extra cycle
 
         read1   READF0
@@ -1252,7 +1258,7 @@ main:
         read1fs READFS2
         nfcall  store_s0a
         read2   READS2
-        nfcall  store_s0b
+        nvcall  store_s0b
 
         read1   READF0
         call    parse_f0
@@ -1264,7 +1270,7 @@ main:
         nfcall  store_s1a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_s1b
+        nvcall  store_s1b
 
         read1   READF0
         call    parse_f0
@@ -1288,7 +1294,7 @@ main:
         call    parse_s2
         call    parse_s3
         read1   READF3
-        nopm    48
+        call    chk_slow
 
 ;;; Second round
 
@@ -1301,7 +1307,7 @@ main:
         read1fs READFS0
         nfcall  store_f0a
         read2   READS0
-        nfcall  store_f0b
+        nvcall  store_f0b
 
         read1   READF0
         call    parse_f0
@@ -1313,7 +1319,7 @@ main:
         nfcall  store_f1a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_f1b
+        nvcall  store_f1b
         nop                     ; extra cycle
 
         read1   READF0
@@ -1325,7 +1331,7 @@ main:
         read1fs READFS1
         nfcall  store_f2a
         read2   READS1
-        nfcall  store_f2b
+        nvcall  store_f2b
 
         read1   READF0
         call    parse_f0
@@ -1337,7 +1343,7 @@ main:
         nfcall  store_f3a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_f3b
+        nvcall  store_f3b
 
         read1   READF0
         call    parse_f0
@@ -1348,7 +1354,7 @@ main:
         read1fs READFS2
         nfcall  store_s2a
         read2   READS2
-        nfcall  store_s2b
+        nvcall  store_s2b
         nop                     ; extra cycle
 
         read1   READF0
@@ -1361,7 +1367,7 @@ main:
         nfcall  store_s3a
         read1   READF3
         nopm    2               ; before store_b to time those calls regularly
-        nfcall  store_s3b
+        nvcall  store_s3b
 
         read1   READF0
         call    parse_f0
@@ -1397,15 +1403,21 @@ main:
 
 chk_input:
         movfw   SEND_CNT_TMP
+
+        movlb   12
+
         addwf   SEND_CNT + 3, f
         movlw   0x00
         addwfc  SEND_CNT + 2, f
         addwfc  SEND_CNT + 1, f
         addwfc  SEND_CNT + 0, f
+
+        movlb   0
+
         clrf    SEND_CNT_TMP
 
         btfsc   CONFIG_PORT, CONFIG_PIN
-        goto    return_in_35    ; 43 cycles to here
+        goto    return_in_33    ; 43 cycles to here
 
         nvcall  interactive_start
 
@@ -1481,6 +1493,94 @@ chk_time_invalid:               ; 10 cycles to here
         movwf   TM0L
 
         goto    return_in_29    ; 44 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 47 cycles including call and return. Every 7 seconds, check for
+;;; channels with no activity since last check and free channel and
+;;; bank if held.
+;;;
+;;; SLOW_MODE2:1 has these meanings
+;;;
+;;;   00xxxxxx xxxxxxxx     waiting, x >= 8 is counter
+;;;   01000000 00000xxx     checking for slow channel, x is channel number
+chk_slow:
+        incfsz  SLOW_MODE1, f
+        decf    SLOW_MODE2, f
+        incf    SLOW_MODE2, f
+
+        btfss   SLOW_MODE2, 6
+        goto    return_in_41    ; 45 cycles to here
+
+        btfsc   SLOW_MODE1, 3
+        goto    chk_slow_reset
+
+        ;; 7 cycles to here
+
+        clrf    FSR0H
+        movfw   SLOW_MODE1
+        addlw   LOW(BANK0)
+        movwf   FSR0L           ; FSR0H:L points to bank for channel
+
+        incf    INDF0, W
+        btfsc   STATUS, Z
+        goto    chk_slow_done   ; Channel already waiting
+
+        movfw   INDF0
+        sublw   DISCARD_BANK
+        btfsc   STATUS, Z
+        goto    chk_slow_done2  ; Channel already discarding
+
+        ;; 18 cycles to here
+
+        movlw   6
+        movwf   FSR0H           ; Reset FSR0H to point to bank 12
+
+        movlw   0x01
+        btfsc   SLOW_MODE1, 1
+        movlw   0x04
+        btfsc   SLOW_MODE1, 0
+        lslf    WREG, f
+        btfsc   SLOW_MODE1, 2
+        swapf   WREG, f
+
+        movwf   FSR0L           ; FSR0 not used for anything else
+
+        ;; 28 cycles to here
+
+        andwf   ACTIVE, W
+        btfss   STATUS, Z
+        goto    return_in_15    ; 45 cycles to here, channel active, so do nothing
+
+        ;; The channel is slow, fix it
+
+        movfw   FSR0L           ; FSR0L is the channel bit
+        iorwf   WAITING, f
+        iorwf   PHASE, f        ; This indicates a frame error, which will clean up channel
+
+        movlb   12
+        iorwf   ERR_CHN_SLOW, f
+
+        incfsz  CNT_SLOW, W
+        movwf   CNT_SLOW
+        movlb   0
+
+        goto    return_in_6     ; 45 cycles to here
+
+chk_slow_reset:                 ; 8 cycles to here
+        clrf    ACTIVE
+        clrf    SLOW_MODE2
+
+        goto    return_in_35    ; 45 cycles to here
+
+chk_slow_done:                  ; 15 cycles to here
+        nopm    4
+
+chk_slow_done2:                 ; 19 cycles to here
+        movlw   6
+        movwf   FSR0H           ; Reset FSR0H to point to bank 12
+
+        goto    return_in_24    ; 45 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -1721,291 +1821,272 @@ store_f3a:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; 46 cycles including nfcall and return. Finishes storage or sends
-;;; data.
-store_s0b:
-        mv_char2 SLOW0_NUM, 1
-
-;;; //////////
-
-store_s1b:
-        mv_char2 SLOW1_NUM, 0
-
-;;; //////////
-
-store_s2b:
-        mv_char2 SLOW2_NUM, 1
-
-;;; //////////
-
-store_s3b:
-        mv_char2 SLOW3_NUM, 0
-
-;;; //////////
-
-store_f0b:
-        mv_char2 FAST0_NUM, 1
-
-;;; //////////
-
-store_f1b:
-        mv_char2 FAST1_NUM, 0
-
-;;; //////////
-
-store_f2b:
-        mv_char2 FAST2_NUM, 1
-
-;;; //////////
-
-store_f3b:
-        mv_char2 FAST3_NUM, 0
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; 31 cycles including call and return. If needed, move a char from
-;;; our own transmit queue to the built-in one.
-send_char:
-        nopm    8
-
-        btfss   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_19   ; 28 cycles to here, no char to send
-
-        btfss   PIR1, TXIF
-        goto    freturn_in_17   ; 28 cycles to here, no room
-
-        btfsc   T2CON, TMR2ON
-        btfsc   PIR1, TMR2IF
-        goto    send_char_ok    ; timer not running or has expired
-
-        goto    freturn_in_13   ; 28 cycles to here, timer running and not expired
-
-send_char_ok:                   ; 16 cycles to here
-        bcf     PIR1, TMR2IF
-        bcf     T2CON, TMR2ON
-
-        movfw   SEND_CHAR
-        sublw   '\n'
-        btfsc   STATUS, Z
-        bsf     T2CON, TMR2ON   ; start timer when newline
-
-        movfw   SEND_CHAR
-        bcf     SD_CH_FLAGS, SD_CH_BIT
-
-        movlb   3
-        movwf   TXREG
-        movlb   0
-
-        return                  ; 28 cycles to here
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; 31 cycles including call and return. Check if we need to do
-;;; something regarding sending.
-send_check:
-        btfss   SEND_BK, 7
-        goto    send_check_done ; We are already sending
-
-        movfw   Q_END
-        subwf   Q_START, W
-
-        btfsc   STATUS, Z
-        goto    freturn_in_23   ; Nothing is awaiting being sent, 28 cycles to here
-
-        movfw   Q_START
-        addlw   LOW(QUEUE)
-        movwf   FSR0L           ; FSRH:L points to the first element in the queue
-
-        movfw   INDF0           ; W = bank to be sent
-        movwf   SEND_BK
-
-        btfsc   CHN_OUT_FLAGS, CHN_OUT_BIT
-        bsf     SEND_BK, 4
-        bsf     SEND_BK, 6
-
-        incf    Q_START, f
-        bcf     Q_START, 4      ; start over at 16
-
-        goto    freturn_in_12   ; 28 cycles to here
-
-send_check_done:                ; 3 cycles to here
-        call    send            ; 24 cycles, so 27 cycles to here
-
-        return                  ; 28 cycles to here
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; SEND_BK   10000000: not sending
-;;; SEND_BK   0100xxxx: getting ready to send from bank xxxx
-;;; SEND_BK   0101xxxx: getting ready to send from bank xxxx
-;;; SEND_BK   0010xxxx: finish of sending from bank xxxx
-;;; SEND_BK   0011xxxx: more finish of sending from bank xxxx
-;;; SEND_BK   0000xxxx: sending from bank xxxx
-
-;;; 24 cycles including call and return. Sends data from banks.
-send:
-        btfsc   SEND_BK, 5
-        goto    send_finish
-        btfsc   SEND_BK, 6
-        goto    send_setup
-        btfsc   SEND_BK, 7
-        goto    freturn_in_16   ; 21 cycles to here
-
-do_send:                        ; 6 cycles to here
-        btfsc   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_14   ; No room for next char, 21 cycles to here
-
-        movfw   SEND_END
-        subwf   FSR1L, W
-
-        btfsc   STATUS, Z
-        goto    do_send_last
-
-;;; Not last position
-        movfw   INDF1
-
-        movwf   SEND_CHAR
-        bsf     SD_CH_FLAGS, SD_CH_BIT
-
-        incf    FSR1L, f        ; Move pointer
-
-        goto    freturn_in_5    ; 21 cycles to here
-
-do_send_last:                   ; 13 cycles to here
-        bsf     SEND_BK, 5      ; Stop sending
-
-        movlw   '\r'
-        btfss   NEWLINE_FLAGS, NEWLINE_BIT
-        movlw   '\n'
-
-        movwf   SEND_CHAR
-        bsf     SD_CH_FLAGS, SD_CH_BIT
-
+;;; Convert a char that was read according to this:
+;;;
+;;;   - '\r' and '\n' becomes 0x00
+;;;
+;;;   - printable characters ('\t' and 0x20 to 0x7E) are unchanged
+;;;
+;;;   - non-printable characters become 0xFF
+convert_char:
+        brw
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x09             ; '\t', keep it is normal character
+        retlw  0x00             ; '\n'
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x00             ; '\r'
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0x20
+        retlw  0x21
+        retlw  0x22
+        retlw  0x23
+        retlw  0x24
+        retlw  0x25
+        retlw  0x26
+        retlw  0x27
+        retlw  0x28
+        retlw  0x29
+        retlw  0x2A
+        retlw  0x2B
+        retlw  0x2C
+        retlw  0x2D
+        retlw  0x2E
+        retlw  0x2F
+        retlw  0x30
+        retlw  0x31
+        retlw  0x32
+        retlw  0x33
+        retlw  0x34
+        retlw  0x35
+        retlw  0x36
+        retlw  0x37
+        retlw  0x38
+        retlw  0x39
+        retlw  0x3A
+        retlw  0x3B
+        retlw  0x3C
+        retlw  0x3D
+        retlw  0x3E
+        retlw  0x3F
+        retlw  0x40
+        retlw  0x41
+        retlw  0x42
+        retlw  0x43
+        retlw  0x44
+        retlw  0x45
+        retlw  0x46
+        retlw  0x47
+        retlw  0x48
+        retlw  0x49
+        retlw  0x4A
+        retlw  0x4B
+        retlw  0x4C
+        retlw  0x4D
+        retlw  0x4E
+        retlw  0x4F
+        retlw  0x50
+        retlw  0x51
+        retlw  0x52
+        retlw  0x53
+        retlw  0x54
+        retlw  0x55
+        retlw  0x56
+        retlw  0x57
+        retlw  0x58
+        retlw  0x59
+        retlw  0x5A
+        retlw  0x5B
+        retlw  0x5C
+        retlw  0x5D
+        retlw  0x5E
+        retlw  0x5F
+        retlw  0x60
+        retlw  0x61
+        retlw  0x62
+        retlw  0x63
+        retlw  0x64
+        retlw  0x65
+        retlw  0x66
+        retlw  0x67
+        retlw  0x68
+        retlw  0x69
+        retlw  0x6A
+        retlw  0x6B
+        retlw  0x6C
+        retlw  0x6D
+        retlw  0x6E
+        retlw  0x6F
+        retlw  0x70
+        retlw  0x71
+        retlw  0x72
+        retlw  0x73
+        retlw  0x74
+        retlw  0x75
+        retlw  0x76
+        retlw  0x77
+        retlw  0x78
+        retlw  0x79
+        retlw  0x7A
+        retlw  0x7B
+        retlw  0x7C
+        retlw  0x7D
+        retlw  0x7E
+        retlw  0xFF             ; 0x7F and up is no good
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
+        retlw  0xFF
         nop
-        return                  ; 21 cycles to here
-
-send_setup:                     ; 5 cycles to here
-        btfsc   SEND_BK, 4
-        goto    send_setup2
-        movlw   LOW(PTR0)
-        movwf   FSR0L
-
-        bcf     SEND_BK, 6
-        movfw   SEND_BK
-        movwf   FSR1H
-        addwf   FSR0L, f        ; FSR0H:L points to pointer for relevant bank
-
-        movfw   INDF0
-        movwf   SEND_END        ; SEND_END is the pointer to the byte after the last in the bank
-
-        movlw   0x40
-        movwf   FSR1L
-        lsrf    FSR1H, f
-        rrf     FSR1L, f        ; FSR1H:L points to first byte of data to be sent
-
-        nop
-
-        return                  ; 21 cycles to here
-
-send_setup2:                    ; 8 cycles to here
-        btfsc   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_12   ; No room for next char, 21 cycles to here
-
-        bcf     SEND_BK, 4
-
-        movfw   SEND_BK
-        addlw   LOW(REF0) - 0x40 ; Account for bit 6 being set in SEND_BK
-        movwf   FSR0L           ; FSR0H:L points to reference
-
-        movfw   INDF0
-        addlw   '1'
-
-        movwf   SEND_CHAR
-        bsf     SD_CH_FLAGS, SD_CH_BIT
-
-        nopm    2
-
-        return                  ; 21 cycles to here
-
-send_finish:                    ; 3 cycles to here
-        btfss   NEWLINE_FLAGS, NEWLINE_BIT
-        goto    send_finish1
-;;; Return-newline mode
-
-        btfsc   SEND_BK, 4
-        goto    send_finish2
-
-        movlw   0x01
-        btfsc   SEND_BK, 1
-        movlw   0x04
-        btfsc   SEND_BK, 0
-        lslf    WREG, f
-        btfsc   SEND_BK, 2
-        swapf   WREG, f
-        btfss   SEND_BK, 3
-        iorwf   BK_FREEL, f
-        btfsc   SEND_BK, 3
-        iorwf   BK_FREEH, f
-
-;;; The bank is now marked as free
-        bsf     SEND_BK, 4      ; do send_finish2 next time
-
-        nop
-        return                  ; 21 cycles to here
-
-;;; Newline only mode
-send_finish1:                   ; 6 cycles to here
-        movlw   0x01
-        btfsc   SEND_BK, 1
-        movlw   0x04
-        btfsc   SEND_BK, 0
-        lslf    WREG, f
-        btfsc   SEND_BK, 2
-        swapf   WREG, f
-        btfss   SEND_BK, 3
-        iorwf   BK_FREEL, f
-        btfsc   SEND_BK, 3
-        iorwf   BK_FREEH, f
-
-;;; The bank is now marked as free
-        movlw   0x80
-        movwf   SEND_BK         ; We are done sending
-
-        nop
-        return                  ; 21 cycles to here
-
-send_finish2:                   ; 8 cycles to here
-        btfsc   SD_CH_FLAGS, SD_CH_BIT
-        goto    freturn_in_12   ; No room for next char, 21 cycles to here
-
-        movlw   '\n'
-
-        movwf   SEND_CHAR
-        bsf     SD_CH_FLAGS, SD_CH_BIT
-
-        movlw   0x80
-        movwf   SEND_BK         ; We are done sending
-
-        goto    freturn_in_6    ; 21 cycles to here
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; 16 cycles including call and return. Free the bank given by W.
-free_bank:
-        movwf   FSR0L           ; FSR0L is not used for anything else
-        movlw   0x01
-        btfsc   FSR0L, 1
-        movlw   0x04
-        btfsc   FSR0L, 0
-        lslf    WREG, f
-        btfsc   FSR0L, 2
-        swapf   WREG, f
-        btfss   FSR0L, 3
-        iorwf   BK_FREEL, f
-        btfsc   FSR0L, 3
-        iorwf   BK_FREEH, f
-
-        return                  ; 13 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -2088,6 +2169,294 @@ veryfar code    0x1000
 if (FAST_BIT0 != 0 || FAST_BIT1 != 1 || FAST_BIT2 != 2 || FAST_BIT3 != 3)
         ERROR   "FAST_BITs assumed to be 0, 1, 2, and 3"
 endif
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 46 cycles including nfcall and return. Finishes storage or sends
+;;; data.
+store_s0b:
+        mv_char2 SLOW0_NUM, 1
+
+;;; //////////
+
+store_s1b:
+        mv_char2 SLOW1_NUM, 0
+
+;;; //////////
+
+store_s2b:
+        mv_char2 SLOW2_NUM, 1
+
+;;; //////////
+
+store_s3b:
+        mv_char2 SLOW3_NUM, 0
+
+;;; //////////
+
+store_f0b:
+        mv_char2 FAST0_NUM, 1
+
+;;; //////////
+
+store_f1b:
+        mv_char2 FAST1_NUM, 0
+
+;;; //////////
+
+store_f2b:
+        mv_char2 FAST2_NUM, 1
+
+;;; //////////
+
+store_f3b:
+        mv_char2 FAST3_NUM, 0
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 31 cycles including call and return. If needed, move a char from
+;;; our own transmit queue to the built-in one.
+send_char:
+        nopm    8
+
+        btfss   SD_CH_FLAGS, SD_CH_BIT
+        goto    vreturn_in_19   ; 28 cycles to here, no char to send
+
+        btfss   PIR1, TXIF
+        goto    vreturn_in_17   ; 28 cycles to here, no room
+
+        btfsc   T2CON, TMR2ON
+        btfsc   PIR1, TMR2IF
+        goto    send_char_ok    ; timer not running or has expired
+
+        goto    vreturn_in_13   ; 28 cycles to here, timer running and not expired
+
+send_char_ok:                   ; 16 cycles to here
+        bcf     PIR1, TMR2IF
+        bcf     T2CON, TMR2ON
+
+        movfw   SEND_CHAR
+        sublw   '\n'
+        btfsc   STATUS, Z
+        bsf     T2CON, TMR2ON   ; start timer when newline
+
+        movfw   SEND_CHAR
+        bcf     SD_CH_FLAGS, SD_CH_BIT
+
+        movlb   3
+        movwf   TXREG
+        movlb   0
+
+        return                  ; 28 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 31 cycles including call and return. Check if we need to do
+;;; something regarding sending.
+send_check:
+        btfss   SEND_BK, 7
+        goto    send_check_done ; We are already sending
+
+        movfw   Q_END
+        subwf   Q_START, W
+
+        btfsc   STATUS, Z
+        goto    vreturn_in_23   ; Nothing is awaiting being sent, 28 cycles to here
+
+        movfw   Q_START
+        addlw   LOW(QUEUE)
+        movwf   FSR0L           ; FSRH:L points to the first element in the queue
+
+        movfw   INDF0           ; W = bank to be sent
+        movwf   SEND_BK
+
+        btfsc   CHN_OUT_FLAGS, CHN_OUT_BIT
+        bsf     SEND_BK, 4
+        bsf     SEND_BK, 6
+
+        incf    Q_START, f
+        bcf     Q_START, 4      ; start over at 16
+
+        goto    vreturn_in_12   ; 28 cycles to here
+
+send_check_done:                ; 3 cycles to here
+        call    send            ; 24 cycles, so 27 cycles to here
+
+        return                  ; 28 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 16 cycles including call and return. Free the bank given by W.
+free_bank:
+        movwf   FSR0L           ; FSR0L is not used for anything else
+        movlw   0x01
+        btfsc   FSR0L, 1
+        movlw   0x04
+        btfsc   FSR0L, 0
+        lslf    WREG, f
+        btfsc   FSR0L, 2
+        swapf   WREG, f
+        btfss   FSR0L, 3
+        iorwf   BK_FREEL, f
+        btfsc   FSR0L, 3
+        iorwf   BK_FREEH, f
+
+        return                  ; 13 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; SEND_BK   10000000: not sending
+;;; SEND_BK   0100xxxx: getting ready to send from bank xxxx
+;;; SEND_BK   0101xxxx: getting ready to send from bank xxxx
+;;; SEND_BK   0010xxxx: finish of sending from bank xxxx
+;;; SEND_BK   0011xxxx: more finish of sending from bank xxxx
+;;; SEND_BK   0000xxxx: sending from bank xxxx
+
+;;; 24 cycles including call and return. Sends data from banks.
+send:
+        btfsc   SEND_BK, 5
+        goto    send_finish
+        btfsc   SEND_BK, 6
+        goto    send_setup
+        btfsc   SEND_BK, 7
+        goto    vreturn_in_16   ; 21 cycles to here
+
+do_send:                        ; 6 cycles to here
+        btfsc   SD_CH_FLAGS, SD_CH_BIT
+        goto    vreturn_in_14   ; No room for next char, 21 cycles to here
+
+        movfw   SEND_END
+        subwf   FSR1L, W
+
+        btfsc   STATUS, Z
+        goto    do_send_last
+
+;;; Not last position
+        movfw   INDF1
+
+        movwf   SEND_CHAR
+        bsf     SD_CH_FLAGS, SD_CH_BIT
+
+        incf    FSR1L, f        ; Move pointer
+
+        goto    vreturn_in_5    ; 21 cycles to here
+
+do_send_last:                   ; 13 cycles to here
+        bsf     SEND_BK, 5      ; Stop sending
+
+        movlw   '\r'
+        btfss   NEWLINE_FLAGS, NEWLINE_BIT
+        movlw   '\n'
+
+        movwf   SEND_CHAR
+        bsf     SD_CH_FLAGS, SD_CH_BIT
+
+        nop
+        return                  ; 21 cycles to here
+
+send_setup:                     ; 5 cycles to here
+        btfsc   SEND_BK, 4
+        goto    send_setup2
+        movlw   LOW(PTR0)
+        movwf   FSR0L
+
+        bcf     SEND_BK, 6
+        movfw   SEND_BK
+        movwf   FSR1H
+        addwf   FSR0L, f        ; FSR0H:L points to pointer for relevant bank
+
+        movfw   INDF0
+        movwf   SEND_END        ; SEND_END is the pointer to the byte after the last in the bank
+
+        movlw   0x40
+        movwf   FSR1L
+        lsrf    FSR1H, f
+        rrf     FSR1L, f        ; FSR1H:L points to first byte of data to be sent
+
+        nop
+
+        return                  ; 21 cycles to here
+
+send_setup2:                    ; 8 cycles to here
+        btfsc   SD_CH_FLAGS, SD_CH_BIT
+        goto    vreturn_in_12   ; No room for next char, 21 cycles to here
+
+        bcf     SEND_BK, 4
+
+        movfw   SEND_BK
+        addlw   LOW(REF0) - 0x40 ; Account for bit 6 being set in SEND_BK
+        movwf   FSR0L           ; FSR0H:L points to reference
+
+        movfw   INDF0
+        addlw   '1'
+
+        movwf   SEND_CHAR
+        bsf     SD_CH_FLAGS, SD_CH_BIT
+
+        nopm    2
+
+        return                  ; 21 cycles to here
+
+send_finish:                    ; 3 cycles to here
+        btfss   NEWLINE_FLAGS, NEWLINE_BIT
+        goto    send_finish1
+;;; Return-newline mode
+
+        btfsc   SEND_BK, 4
+        goto    send_finish2
+
+        movlw   0x01
+        btfsc   SEND_BK, 1
+        movlw   0x04
+        btfsc   SEND_BK, 0
+        lslf    WREG, f
+        btfsc   SEND_BK, 2
+        swapf   WREG, f
+        btfss   SEND_BK, 3
+        iorwf   BK_FREEL, f
+        btfsc   SEND_BK, 3
+        iorwf   BK_FREEH, f
+
+;;; The bank is now marked as free
+        bsf     SEND_BK, 4      ; do send_finish2 next time
+
+        nop
+        return                  ; 21 cycles to here
+
+;;; Newline only mode
+send_finish1:                   ; 6 cycles to here
+        movlw   0x01
+        btfsc   SEND_BK, 1
+        movlw   0x04
+        btfsc   SEND_BK, 0
+        lslf    WREG, f
+        btfsc   SEND_BK, 2
+        swapf   WREG, f
+        btfss   SEND_BK, 3
+        iorwf   BK_FREEL, f
+        btfsc   SEND_BK, 3
+        iorwf   BK_FREEH, f
+
+;;; The bank is now marked as free
+        movlw   0x80
+        movwf   SEND_BK         ; We are done sending
+
+        nop
+        return                  ; 21 cycles to here
+
+send_finish2:                   ; 8 cycles to here
+        btfsc   SD_CH_FLAGS, SD_CH_BIT
+        goto    vreturn_in_12   ; No room for next char, 21 cycles to here
+
+        movlw   '\n'
+
+        movwf   SEND_CHAR
+        bsf     SD_CH_FLAGS, SD_CH_BIT
+
+        movlw   0x80
+        movwf   SEND_BK         ; We are done sending
+
+        goto    vreturn_in_6    ; 21 cycles to here
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -2859,7 +3228,7 @@ read_hex_A_F:
         return
 
 read_hex_error_A_F:
-        sublw   5 
+        sublw   5
         addlw   'A'
         bsf     STATUS, Z
         return
@@ -3080,7 +3449,7 @@ inter_cmd_discard:
         btfsc   STATUS, Z
         goto    discard_ok      ; A value of zero is ok
 
-        call    convert_char
+        vfcall  convert_char
         addlw   0               ; Update zero flag
         btfss   STATUS, Z
         incf    WREG, W
@@ -3567,16 +3936,24 @@ output_debug:
         movlw   ' '
         call    write_char
 
+        movlb   12
         movfw   SEND_CNT
+        movlb   0
         call    write_hex
 
+        movlb   12
         movfw   SEND_CNT + 1
+        movlb   0
         call    write_hex
 
+        movlb   12
         movfw   SEND_CNT + 2
+        movlb   0
         call    write_hex
 
+        movlb   12
         movfw   SEND_CNT + 3
+        movlb   0
         call    write_hex
 
         movlw   '\n'
@@ -3725,7 +4102,7 @@ output_debug:
         movlw   '\n'
         call    write_char
 
-;;;         return TODO
+        return
 
 ;;; This is extra debug info that is not generally needed:
         movlw   'F'
@@ -3913,10 +4290,6 @@ ch8_uart_receive:
 ;;; at startup and after the interactive mode.
 init2:
         clrf    SEND_CNT_TMP
-        clrf    SEND_CNT
-        clrf    SEND_CNT + 1
-        clrf    SEND_CNT + 2
-        clrf    SEND_CNT + 3
 
         clrf    TIMER0H + FAST0_NUM
         clrf    TIMER0H + FAST1_NUM
@@ -3961,12 +4334,23 @@ init2:
 
         movlb   12
 
+        clrf    SEND_CNT
+        clrf    SEND_CNT + 1
+        clrf    SEND_CNT + 2
+        clrf    SEND_CNT + 3
+
         clrf    CNT_LONG
         clrf    ERR_CHN_LONG
         clrf    CNT_SLOW
         clrf    ERR_CHN_SLOW
 
         movlb   0
+
+        clrf    ACTIVE
+
+        clrf    SLOW_MODE2
+        movlw   0x08
+        movwf   SLOW_MODE1      ; start at 0x0008
 
         clrf    CNT_CONGEST
         clrf    ERR_CHN_CONGEST
@@ -4143,274 +4527,65 @@ speed_115200:
 
         return
 
-
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; Convert a char that was read according to this:
-;;;
-;;;   - '\r' and '\n' becomes 0x00
-;;;
-;;;   - printable characters ('\t' and 0x20 to 0x7E) are unchanged
-;;;
-;;;   - non-printable characters become 0xFF
-convert_char:
-        brw
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0x09             ; '\t', keep it is normal character
-        retlw  0x00             ; '\n'
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0x00             ; '\r'
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0x20
-        retlw  0x21
-        retlw  0x22
-        retlw  0x23
-        retlw  0x24
-        retlw  0x25
-        retlw  0x26
-        retlw  0x27
-        retlw  0x28
-        retlw  0x29
-        retlw  0x2A
-        retlw  0x2B
-        retlw  0x2C
-        retlw  0x2D
-        retlw  0x2E
-        retlw  0x2F
-        retlw  0x30
-        retlw  0x31
-        retlw  0x32
-        retlw  0x33
-        retlw  0x34
-        retlw  0x35
-        retlw  0x36
-        retlw  0x37
-        retlw  0x38
-        retlw  0x39
-        retlw  0x3A
-        retlw  0x3B
-        retlw  0x3C
-        retlw  0x3D
-        retlw  0x3E
-        retlw  0x3F
-        retlw  0x40
-        retlw  0x41
-        retlw  0x42
-        retlw  0x43
-        retlw  0x44
-        retlw  0x45
-        retlw  0x46
-        retlw  0x47
-        retlw  0x48
-        retlw  0x49
-        retlw  0x4A
-        retlw  0x4B
-        retlw  0x4C
-        retlw  0x4D
-        retlw  0x4E
-        retlw  0x4F
-        retlw  0x50
-        retlw  0x51
-        retlw  0x52
-        retlw  0x53
-        retlw  0x54
-        retlw  0x55
-        retlw  0x56
-        retlw  0x57
-        retlw  0x58
-        retlw  0x59
-        retlw  0x5A
-        retlw  0x5B
-        retlw  0x5C
-        retlw  0x5D
-        retlw  0x5E
-        retlw  0x5F
-        retlw  0x60
-        retlw  0x61
-        retlw  0x62
-        retlw  0x63
-        retlw  0x64
-        retlw  0x65
-        retlw  0x66
-        retlw  0x67
-        retlw  0x68
-        retlw  0x69
-        retlw  0x6A
-        retlw  0x6B
-        retlw  0x6C
-        retlw  0x6D
-        retlw  0x6E
-        retlw  0x6F
-        retlw  0x70
-        retlw  0x71
-        retlw  0x72
-        retlw  0x73
-        retlw  0x74
-        retlw  0x75
-        retlw  0x76
-        retlw  0x77
-        retlw  0x78
-        retlw  0x79
-        retlw  0x7A
-        retlw  0x7B
-        retlw  0x7C
-        retlw  0x7D
-        retlw  0x7E
-        retlw  0xFF             ; 0x7F and up is no good
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
-        retlw  0xFF
+;;; A goto to one of these is a delayed return here in the veryfar section.
+vreturn_in_30:
+        nop
+vreturn_in_29:
+        nop
+vreturn_in_28:
+        nop
+vreturn_in_27:
+        nop
+vreturn_in_26:
+        nop
+vreturn_in_25:
+        nop
+vreturn_in_24:
+        nop
+vreturn_in_23:
+        nop
+vreturn_in_22:
+        nop
+vreturn_in_21:
+        nop
+vreturn_in_20:
+        nop
+vreturn_in_19:
+        nop
+vreturn_in_18:
+        nop
+vreturn_in_17:
+        nop
+vreturn_in_16:
+        nop
+vreturn_in_15:
+        nop
+vreturn_in_14:
+        nop
+vreturn_in_13:
+        nop
+vreturn_in_12:
+        nop
+vreturn_in_11:
+        nop
+vreturn_in_10:
+        nop
+vreturn_in_9:
+        nop
+vreturn_in_8:
+        nop
+vreturn_in_7:
+        nop
+vreturn_in_6:
+        nop
+vreturn_in_5:
+        nop
+vreturn_in_4:
+        nop
+vreturn_in_3:
+        return
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 ;;; Settings sections starts here.
