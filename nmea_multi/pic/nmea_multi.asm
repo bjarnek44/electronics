@@ -258,10 +258,7 @@
 ;;; The assembler does not alert when a wrong long call is being
 ;;; used. This code cheks for such instances:
 ;;;
-;;;   awk 'BEGIN {t="m"} $2 == "code" {t = substr($1,1,1)} substr($1, length($1)) == ":" {s[substr($1, 1, length($1)-1)]=t} END {for (i in s) {print i, s[i]}}' nmea.asm > tmp.txt ; awk 'BEGIN {while (getline < "tmp.txt") {s[$1]=$2}} substr($0,1,1) == " " && substr($1, 3) == "call" && s[$2] != substr($1,2,1) {print "Error:", $1, $2, s[$2]; c = 1} END {if (c == 0) {print "No errors"}}' nmea.asm
-
-;;;   TODO: allow inverted input for configuration (for stand alone version)
-;;;   TODO: auto detect inversion of input for configuration (for stand alone version)
+;;;   awk 'BEGIN {t="m"} $2 == "code" {t = substr($1,1,1)} substr($1, length($1)) == ":" {s[substr($1, 1, length($1)-1)]=t} END {for (i in s) {print i, s[i]}}' nmea_multi.asm > tmp.txt ; awk 'BEGIN {while (getline < "tmp.txt") {s[$1]=$2}} substr($0,1,1) == " " && substr($1, 3) == "call" && s[$2] != substr($1,2,1) {print "Error:", $1, $2, s[$2]; c = 1} END {if (c == 0) {print "No errors"}}' nmea_multi.asm
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -301,27 +298,24 @@ FLAGS           equ     0x65            ; Various flags
 INVERT_F        equ     0x66            ; Input on fast port is xor'ed with this
 INVERT_S        equ     0x67            ; Input on slow port is xor'ed with this
 
-INTER_TMP       equ     0x68            ; Temporary storage used in interactive mode
-INTER_CHANNEL   equ     0x69            ; Channel number used in interactive mode
-INTER_VALUE     equ     0x6A            ; Command value number used in interactive mode
+TM0H            equ     0x68            ; Last timer value, high part (note reuse of memory)
+TM0L            equ     0x69            ; Last timer value, low part (note reuse of memory)
+TM1H            equ     0x6A            ; Minimum cycle count, high part
+TM1L            equ     0x6B            ; Minimum cycle count, low part
+TM2H            equ     0x6C            ; Maximum cycle count, high part
+TM2L            equ     0x6D            ; Maximum cycle count, low part
+TM3H            equ     0x6E            ; Temporary timer value, high part
+TM3L            equ     0x6F            ; Temporary timer value, low part (note reuse of memory)
 
-SEND_CNT_TMP    equ     0x6B            ; Counter for sent sentences to be transferred to main counter
+SEND_CNT_TMP    equ     0x70            ; Counter for sent sentences to be transferred to main counter
 
-ACTIVE          equ     0x6C            ; Active channels
-STUCK_MODE1     equ     0x6D            ; Low part of counter for stuck sentences, and related
-STUCK_MODE2     equ     0x6E            ; High part of counter for stuck sentences, and related
+ACTIVE          equ     0x71            ; Active channels
+STUCK_MODE1     equ     0x72            ; Low part of counter for stuck sentences, and related
+STUCK_MODE2     equ     0x73            ; High part of counter for stuck sentences, and related
 
-BK_FREEH        equ     0x70            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
-BK_FREEL        equ     0x71            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
+BK_FREEH        equ     0x74            ; Flags for free banks 8 - 15 (12 - 15 not used), must be in shared memory
+BK_FREEL        equ     0x75            ; Flags for free banks 0 - 7 (0 not used), must be in shared memory
 
-TM0H            equ     INTER_CHANNEL   ; Last timer value, high part (note reuse of memory)
-TM0L            equ     INTER_TMP       ; Last timer value, low part (note reuse of memory)
-TM1H            equ     0x74            ; Minimum cycle count, high part
-TM1L            equ     0x75            ; Minimum cycle count, low part
-TM2H            equ     0x76            ; Maximum cycle count, high part
-TM2L            equ     0x77            ; Maximum cycle count, low part
-TM3H            equ     0x78            ; Temporary timer value, high part
-TM3L            equ     INTER_VALUE     ; Temporary timer value, low part (note reuse of memory)
 CNT_CONGEST     equ     0x79            ; Counter for sentences dropped due to missing space
 ERR_CHN_CONGEST equ     0x7A            ; Bits indicating channels with congestion errors
 CNT_FRAME       equ     0x7B            ; Counter for sentences dropped due to frame errors
@@ -347,6 +341,15 @@ CNT_LONG        equ     0x64C           ; Counter for sentences dropped due to b
 ERR_CHN_LONG    equ     0x64D           ; Bits indicating channels with too long sentences
 CNT_STUCK       equ     0x64E           ; Counter for sentences dropped due to taking too long
 ERR_CHN_STUCK   equ     0x64F           ; Bits indicating channels with too slow sentences
+
+
+;;; Re-using memory for interactive mode:
+INTER_TMP       equ     TM0H            ; Temporary storage used in interactive mode
+INTER_CHANNEL   equ     TM0L            ; Channel number used in interactive mode
+INTER_VALUE     equ     TM3H            ; Command value number used in interactive mode
+INTER_MODE      equ     BK_FREEH        ; bit 0: 0 = stand alone, 1 = Raspberry Pi
+                                        ; bit 1: 0 = idle low, 1 idle high (uart input)
+INTER_CHAR      equ     BK_FREEL        ; for building a char in manual input mode
 
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -408,6 +411,9 @@ FAST_BIT0       equ     0               ; The bit for fast channel 0
 FAST_BIT1       equ     1               ; The bit for fast channel 1
 FAST_BIT2       equ     2               ; The bit for fast channel 2
 FAST_BIT3       equ     3               ; The bit for fast channel 3
+
+UART_PORT       equ     SLOW_PORT       ; For stand alone configuration input, use channel 8
+UART_PIN        equ     SLOW3_PIN       ; For stand alone configuration input, use channel 8
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -2945,9 +2951,25 @@ interactive_start:
         call    clear_input
 
         call    speed_4800
+
+        call    is_raspberry
+
+        movlw   0x00
+        btfsc   STATUS, C
+        movlw   0x01            ; Set Raspberry Pi mode
+
+        movwf   INTER_MODE
+
         movlb   3
-        bsf     RC1STA, CREN    ; Enable receive
+        btfsc   WREG, 0         ; W is INTER_MODE
+        bsf     RC1STA, CREN    ; Enable receive if Raspberry Pi
         movlb   0
+
+        btfsc   INTER_MODE, 0
+        goto    interactive_no_ok ; Raspberry Pi mode, we are done
+
+        btfsc   UART_PORT, UART_PIN
+        bsf     INTER_MODE, 1   ; set idle according to current state for stand alone
 
         goto    interactive_no_ok
 
@@ -3108,8 +3130,113 @@ clear_input:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
+;;; Manually read a character from an input channel. Carry flag set on
+;;; success.
+read_char_man:
+        bcf     STATUS, C       ; indicate an error in case we return early
+
+        btfsc   INTER_MODE, 1
+        goto    read_char_man_lp_idle_high
+
+read_char_man_lp_idle_low:
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        return                  ; Return error if CONFIG signal high (should not be in interactive mode)
+
+        btfss   UART_PORT, UART_PIN
+        goto    read_char_man_lp_idle_low
+
+        goto    read_char_man_ready
+
+read_char_man_lp_idle_high:
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        return                  ; Return error if CONFIG signal high (should not be in interactive mode)
+
+        btfsc   UART_PORT, UART_PIN
+        goto    read_char_man_lp_idle_high
+
+        nop                     ; to get the same timing as when idle is low
+        nop
+
+read_char_man_ready:
+        call    read_first_bit  ; wait half an input cycle before reading
+        btfsc   STATUS, C
+        goto    read_char_man_err  ; first bit should be zero
+
+        movlw   0x80
+        movwf   INTER_CHAR
+
+read_char_man_next:
+        call    read_bit        ; 1667 cycles between calls
+        rrf     INTER_CHAR, f
+
+        btfss   STATUS, C       ; this is the bit that was put in to start with
+        goto    read_char_man_next
+
+        nop
+
+        call    read_bit
+
+        ;; Carry flag is set when the stop bit is a one like it should be
+
+        movfw   INTER_CHAR
+
+        return
+
+read_char_man_err:
+        clrw
+
+        bcf     STATUS, C       ; clear carry to indicate error
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 1662 cycles including call and return. Read a bit and put it in carry flag.
+read_bit:
+        movlw   0xD0
+
+read_bit_lp1:
+        nop
+        decfsz  WREG, f
+        goto    read_bit_lp1    ; 4 cycles per iteration
+
+        nop
+
+read_first_bit:                 ; 833 cycles to here
+
+        movlw   0xCC
+
+read_bit_lp2:
+        nop
+        decfsz  WREG, f
+        goto    read_bit_lp2    ; 4 cycles per iteration
+
+        ;; 1649 cycles to here
+
+        bsf     STATUS, C       ; idle is one bit
+
+        btfss   INTER_MODE, 1
+        goto    read_bit_idle_low
+
+        nop
+        btfss   UART_PORT, UART_PIN ; read at 1655 of 1662 cycles from call
+        bcf     STATUS, C
+
+        goto    vreturn_in_4    ; 1659 cycles to here
+
+read_bit_idle_low:
+        btfsc   UART_PORT, UART_PIN ; read at 1655 of 1662 cycles from call
+        bcf     STATUS, C
+
+        goto    vreturn_in_4    ; 1659 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
 ;;; Read a character from the serial port.
 read_char:
+        btfss   INTER_MODE, 0
+        goto    read_char_man   ; Read manually for stand alone board
+
         movlb   3
 
         btfsc   RC1STA, OERR
@@ -3630,7 +3757,7 @@ inter_cmd_debug:
 
 inter_done:
         movlb   3
-        bcf     RC1STA, CREN    ; Disable receive
+        bcf     RC1STA, CREN    ; Disable receive, ok to do even if already off
         movlb   0
 
         call    init2
@@ -4245,6 +4372,11 @@ init:
         movlw   0x27
         movwf   T4CON           ; on, postscaler 5, prescaler 64 for about 9.84 ms = 2.5 s / 256
 
+        movlb   28
+
+        movlw   0x11
+        movwf   RXPPS           ; RC1 is UART receive (for Raspberry Pi mode)
+
         movlb   29
 
         movlw   0x14
@@ -4256,32 +4388,6 @@ init:
 
         movlw   0x82
         movwf   PR2             ; Period for timer 2, used for breaks after sending newline
-
-        return
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; Set the UART receive to the standard pin
-std_uart_receive:
-        movlb   28
-
-        movlw   0x11
-        movwf   RXPPS           ; RC1 is UART receive
-
-        movlb   0
-
-        return
-
-;;; /////////////////////////////////////////////////////////////////////////////
-
-;;; Set the UART receive to channel 8 (for standalone version of board)
-ch8_uart_receive:
-        movlb   28
-
-        movlw   0x12
-        movwf   RXPPS           ; RC2 is UART receive
-
-        movlb   0
 
         return
 
@@ -4454,13 +4560,6 @@ init3:
         movwf   FVRCON          ; Disable fixed voltage reference
 
         movlb   0
-
-        call    is_raspberry
-
-        btfsc   STATUS, C
-        call    std_uart_receive ; For Raspberry Pi
-        btfss   STATUS, C
-        call    ch8_uart_receive ; For stand alone
 
         return
 
