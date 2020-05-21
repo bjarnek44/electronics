@@ -1,5 +1,5 @@
 Overview
-========
+--------
 
 The programs in this folder are used to communicate with the NMEA
 multiplexer. The NMEA 0183 related programs are:
@@ -23,12 +23,12 @@ data.
 ``nmea_0183_read`` by itself just outputs data from the multiplexer to
 stdout, so it can be used by itself to see the NMEA 0183 data.
 
-Each program can be run with the -h option to get information about
+Each program can be run with the ``-h`` option to get information about
 how to use it.
 
 
 Requirements
-============
+------------
 
 Using the Raspbian operating system, the following is needed for the
 progams to run:
@@ -53,7 +53,7 @@ I use [kplex](http://www.stripydog.com/kplex/) for forwarding the NMEA
 
 
 Building
-========
+--------
 
 After installing the required packages, you should be able to just
 run:
