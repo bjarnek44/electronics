@@ -4,9 +4,9 @@ Overview
 The programs in this folder are used to communicate with the NMEA
 multiplexer. The NMEA 0183 related programs are:
 
-  * nmea_0183_read: Reads from the multiplexer
-  * nmea_split: Splits the input into different fifos
-  * nmea_0183_config: configures the multiplexer
+  * ``nmea_0183_read``: Reads from the multiplexer
+  * ``nmea_split``: Splits the input into different fifos
+  * ``nmea_0183_config``: configures the multiplexer
 
 This is a typical use of the two programs for data input:
 
@@ -14,13 +14,13 @@ This is a typical use of the two programs for data input:
 nmea_0183_read | nmea_split -f 234 /tmp/nmea.fifo -f 1 /tmp/navtex.fifo
 ```
 
-The nmea_0183_config program is made to configure the multiplexer and
-tells nmea_0183_read to stop reading while the configuration is going
+``nmea_0183_config`` is made to configure the multiplexer and
+tells ``nmea_0183_read`` to stop reading while the configuration is going
 on. This way, the reader program can be kept running and no
 configuration information is forwarded to devices using the NMEA 0183
 data.
 
-nmea_0183_read by itself just outputs data from the multiplexer to
+``nmea_0183_read`` by itself just outputs data from the multiplexer to
 stdout, so it can be used by itself to see the NMEA 0183 data.
 
 Each program can be run with the -h option to get information about
@@ -39,7 +39,9 @@ sudo apt-get install libgpiod-dev gpiod screen
 ```
 
 The first line adds your user to the gpio group which allows access to
-the GPIO pins as a regular user.
+the GPIO pins as a regular user. You should replace ``<user name>`` with
+the user name for the user that you intend to use for reading the NMEA
+0183 data.
 
 The gpiod package is not strictly needed, but has some good command
 line tools for handling the GPIOs on the Raspberry Pi. The screen
@@ -59,3 +61,5 @@ run:
 ```
 make
 ```
+
+This should compile the programs that are then ready to use.
