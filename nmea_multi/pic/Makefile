@@ -16,6 +16,9 @@ all: nmea_multi.hex
 nmea_multi.o: nmea_multi.asm
 	$(ASM) -o $@ -c -p $(PROC) -I $(INCLUDE) $<
 
+nmea_multi_v01.o: nmea_multi.asm
+	$(ASM) -o $@ -c -p $(PROC) -I $(INCLUDE) $< -DVER_01_PCB
+
 %.hex: %.o
 	$(LINK) -s $(SCRIPT) $< -o $@
 

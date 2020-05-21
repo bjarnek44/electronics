@@ -342,7 +342,6 @@ ERR_CHN_LONG    equ     0x64D           ; Bits indicating channels with too long
 CNT_STUCK       equ     0x64E           ; Counter for sentences dropped due to taking too long
 ERR_CHN_STUCK   equ     0x64F           ; Bits indicating channels with too slow sentences
 
-
 ;;; Re-using memory for interactive mode:
 INTER_TMP       equ     TM0H            ; Temporary storage used in interactive mode
 INTER_CHANNEL   equ     TM0L            ; Channel number used in interactive mode
@@ -351,7 +350,6 @@ INTER_MODE      equ     BK_FREEH        ; bit 0: 0 = stand alone, 1 = Raspberry 
                                         ; bit 1: 0 = idle low, 1 idle high (uart input)
 INTER_CHAR      equ     BK_FREEL        ; for building a char in manual input mode
 
-
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; Constants:
@@ -359,6 +357,33 @@ INTER_CHAR      equ     BK_FREEL        ; for building a char in manual input mo
 MAJOR_VERSION   equ     '0'             ; Major version number
 MINOR_VERSION   equ     '2'             ; Minor version number
 
+#ifdef VER_01_PCB
+CONFIG_PORT     equ     PORTA           ; Input port for configuration signal
+CONFIG_PIN      equ     RA3             ; Input pin for configuration signal
+
+FAST0_NUM       equ     2               ; Overall channel number for fast channel 0
+FAST1_NUM       equ     3               ; Overall channel number for fast channel 1
+FAST2_NUM       equ     4               ; Overall channel number for fast channel 2
+FAST3_NUM       equ     7               ; Overall channel number for fast channel 3
+
+SLOW0_NUM       equ     0               ; Overall channel number for slow channel 0
+SLOW1_NUM       equ     1               ; Overall channel number for slow channel 1
+SLOW2_NUM       equ     5               ; Overall channel number for slow channel 2
+SLOW3_NUM       equ     6               ; Overall channel number for slow channel 3
+
+FAST_PORT       equ     PORTA           ; Input port for fast channels
+SLOW_PORT       equ     PORTC           ; Input port for slow channels
+
+FAST0_PIN       equ     RA2             ; Input pin for fast channel 0
+FAST1_PIN       equ     RA1             ; Input pin for fast channel 1
+FAST2_PIN       equ     RA5             ; Input pin for fast channel 2
+FAST3_PIN       equ     RA0             ; Input pin for fast channel 3
+
+SLOW0_PIN       equ     RC2             ; Input pin for slow channel 0
+SLOW1_PIN       equ     RC1             ; Input pin for slow channel 1
+SLOW2_PIN       equ     RC3             ; Input pin for slow channel 2
+SLOW3_PIN       equ     RC4             ; Input pin for slow channel 3
+#else
 CONFIG_PORT     equ     PORTA           ; Input port for configuration signal
 CONFIG_PIN      equ     RA2             ; Input pin for configuration signal
 
@@ -384,6 +409,7 @@ SLOW0_PIN       equ     RC5             ; Input pin for slow channel 0
 SLOW1_PIN       equ     RC4             ; Input pin for slow channel 1
 SLOW2_PIN       equ     RC3             ; Input pin for slow channel 2
 SLOW3_PIN       equ     RC2             ; Input pin for slow channel 3
+#endif
 
 BANK_MASKH      equ     0x0F            ; Banks 8-11 in use and ...
 BANK_MASKL      equ     0xFE            ; ... banks 1-7 in use
@@ -412,8 +438,8 @@ FAST_BIT1       equ     1               ; The bit for fast channel 1
 FAST_BIT2       equ     2               ; The bit for fast channel 2
 FAST_BIT3       equ     3               ; The bit for fast channel 3
 
-UART_PORT       equ     SLOW_PORT       ; For stand alone configuration input, use channel 8
-UART_PIN        equ     SLOW3_PIN       ; For stand alone configuration input, use channel 8
+UART_PORT       equ     SLOW_PORT       ; For stand alone configuration input ...
+UART_PIN        equ     SLOW3_PIN       ; ... use last slow channel (channel 8 on current PCB)
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
@@ -561,6 +587,7 @@ read2   macro   adr
 ;;; 16 cycles. W is set to the lowest available bank number. Carry set
 ;;; if bank is found.
 find_bk macro   bk1, bk2, channel
+
         local   check_4_7
         local   check_1_3
         local   no_free
@@ -907,6 +934,7 @@ frame_err_no_bank:              ; 17 cycles to here
 ;;; of a character or does some work sending it. The send2 parameter
 ;;; indicates what kind of sending work should be done.
 mv_char2        macro   channel, send2
+
         local   finish_bank_setup
         local   invalid
 
@@ -1531,12 +1559,12 @@ chk_stuck:
 
         incf    INDF0, W
         btfsc   STATUS, Z
-        goto    chk_stuck_done   ; Channel already waiting
+        goto    chk_stuck_done  ; Channel already waiting
 
         movfw   INDF0
         sublw   DISCARD_BANK
         btfsc   STATUS, Z
-        goto    chk_stuck_done2  ; Channel already discarding
+        goto    chk_stuck_done2 ; Channel already discarding
 
         ;; 18 cycles to here
 
@@ -1574,16 +1602,16 @@ chk_stuck:
 
         goto    return_in_6     ; 45 cycles to here
 
-chk_stuck_reset:                 ; 8 cycles to here
+chk_stuck_reset:                ; 8 cycles to here
         clrf    ACTIVE
         clrf    STUCK_MODE2
 
         goto    return_in_35    ; 45 cycles to here
 
-chk_stuck_done:                  ; 15 cycles to here
+chk_stuck_done:                 ; 15 cycles to here
         nopm    4
 
-chk_stuck_done2:                 ; 19 cycles to here
+chk_stuck_done2:                ; 19 cycles to here
         movlw   6
         movwf   FSR0H           ; Reset FSR0H to point to bank 12
 
@@ -3160,7 +3188,7 @@ read_char_man_lp_idle_high:
 read_char_man_ready:
         call    read_first_bit  ; wait half an input cycle before reading
         btfsc   STATUS, C
-        goto    read_char_man_err  ; first bit should be zero
+        goto    read_char_man_err ; first bit should be zero
 
         movlw   0x80
         movwf   INTER_CHAR
@@ -4374,8 +4402,13 @@ init:
 
         movlb   28
 
+#ifdef VER_01_PCB
+        movlw   0x15
+        movwf   RXPPS           ; RC5 is UART receive (for Raspberry Pi mode)
+#else
         movlw   0x11
         movwf   RXPPS           ; RC1 is UART receive (for Raspberry Pi mode)
+#endif
 
         movlb   29
 
