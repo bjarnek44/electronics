@@ -11,7 +11,7 @@ multiplexer. The NMEA 0183 related programs are:
 This is a typical use of the two programs for data input:
 
 ```
-nmea_0183_read | nmea_split -f 234 /tmp/nmea.fifo -f 1 /tmp/navtex.fifo
+nmea_0183_read | nmea_split -f 234 /tmp/nmea.fifo -f 7 /tmp/navtex.fifo
 ```
 
 ``nmea_0183_config`` is made to configure the multiplexer and

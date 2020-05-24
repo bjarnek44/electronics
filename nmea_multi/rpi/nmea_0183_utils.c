@@ -40,15 +40,20 @@ FILE*  open_tty_file( char*  name,
   int             flags  =  O_NOCTTY | O_NDELAY;
   struct termios  options;
 
+  if (name == NULL) {
+    if (is_output) {
+      return  stdout;
+    }
+    else {
+      return  stdin;
+    }
+  }
+
   if (is_output) {
     flags  |=  O_WRONLY;
   }
   else {
     flags  |=  O_RDONLY;
-  }
-
-  if (name == NULL) {
-    return  stdin;
   }
 
   fd  =  open(name, flags);
@@ -116,7 +121,7 @@ FILE*  open_tty_file( char*  name,
 
 void  close_tty_file( FILE*  fp )
 {
-  if (fp != stdin && fclose(fp) != 0) {
+  if (fp != stdin && fp != stdout && fclose(fp) != 0) {
     fprintf(stderr, "Problem closing input file.\n");
     exit(1);
   }

@@ -14,3 +14,10 @@ Pi. The sub-folders are:
     NMEA 0183 part of the multiplexing.
 
 The PCB design is not yet committed to GitHub, but it is on its way.
+
+
+License
+-------
+
+All this code is under the [3-clause BSD
+license](https://opensource.org/licenses/BSD-3-Clause).

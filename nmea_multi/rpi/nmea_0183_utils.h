@@ -27,14 +27,23 @@
 #ifndef __nmea_0183_utils_h__
 #define __nmea_0183_utils_h__
 
+/*
+ * This file defines functions that are useful when handling NMEA 0183
+ * devices and data.
+ */
+
 #include <stdio.h>
 
 #define CONFIG_GPIO 3  // default GPIO for configuration
 
+// Open a tty and exit if it fails. If name is NULL, stdin or stdout
+// is returned.
 FILE*  open_tty_file( char*  name,
 		      int    baud,
                       int    is_output );
 
+// Close a tty file and exit if it fails. If fp is stdin or stdout, do
+// nothing.
 void  close_tty_file( FILE*  fp );
 
 #endif // __nmea_0183_utils_h__
