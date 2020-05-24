@@ -350,6 +350,13 @@ INTER_MODE      equ     BK_FREEH        ; bit 0: 0 = stand alone, 1 = Raspberry 
                                         ; bit 1: 0 = idle low, 1 idle high (uart input)
 INTER_CHAR      equ     BK_FREEL        ; for building a char in manual input mode
 
+INTER_TM1L      equ     BUILD0          ; Timer storage used in interactive mode
+INTER_TM1H      equ     BUILD0 + 1      ; Timer storage used in interactive mode
+INTER_TM2L      equ     BUILD0 + 2      ; Timer storage used in interactive mode
+INTER_TM2H      equ     BUILD0 + 3      ; Timer storage used in interactive mode
+
+INTER_TMP2      equ     BUILD0 + 4      ; Temporary storage used in interactive mode
+
 ;;; /////////////////////////////////////////////////////////////////////////////
 
 ;;; Constants:
@@ -360,6 +367,9 @@ MINOR_VERSION   equ     '2'             ; Minor version number
 #ifdef VER_01_PCB
 CONFIG_PORT     equ     PORTA           ; Input port for configuration signal
 CONFIG_PIN      equ     RA3             ; Input pin for configuration signal
+
+UART2_PORT      equ     PORTC           ; UART input for Raspberry Pi
+UART2_PIN       equ     RC5             ; UART input for Raspberry Pi
 
 FAST0_NUM       equ     2               ; Overall channel number for fast channel 0
 FAST1_NUM       equ     3               ; Overall channel number for fast channel 1
@@ -386,6 +396,9 @@ SLOW3_PIN       equ     RC4             ; Input pin for slow channel 3
 #else
 CONFIG_PORT     equ     PORTA           ; Input port for configuration signal
 CONFIG_PIN      equ     RA2             ; Input pin for configuration signal
+
+UART2_PORT      equ     PORTC           ; UART input for Raspberry Pi
+UART2_PIN       equ     RC1             ; UART input for Raspberry Pi
 
 FAST0_NUM       equ     0               ; Overall channel number for fast channel 0
 FAST1_NUM       equ     1               ; Overall channel number for fast channel 1
@@ -473,6 +486,7 @@ settings        macro
         retlw   0x00            ; Inverted output
         retlw   0x02            ; Speed
         retlw   0xFF            ; Schmitt triggers
+        retlw   0x00            ; OSCTUNE
 
         endm
 
@@ -1210,6 +1224,62 @@ save:                           ; 9 cycles to here
         movwf   dl
 
 done:                           ; 13 cycles to here
+
+        endm
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for a particular input on particular pin. The zero flag is
+;;; set on error. The input value is measured on cycle 3 after the
+;;; call and then every three cycles until cycle 2301. The value must
+;;; be the original on cycle 3 and the goal on cycle 2301, otherwise
+;;; an error is reported. On success, the code resumes exactly 3
+;;; cycles after the first measuremnt of the goal.
+in_wait macro   port, pin, goal_high
+
+        local   in_wait_lp
+        local   in_wait_done1
+        local   in_wait_done2
+
+        clrw
+        bsf     STATUS, Z       ; to indicate error if goal measured right away
+
+in_wait_lp:
+        ;; First measurement is on cycle 3 from call.
+if (goal_high)
+        btfsc   port, pin
+else
+        btfss   port, pin
+endif
+        goto    in_wait_done1
+
+        incf    WREG, f
+
+        ;; last measurement is here in round 256 of the loop, so 6 +
+        ;; 255 * 9 = 2301 cycles after call. No matter the value in
+        ;; this case, the zero flag is set, so timeout error.
+if (goal_high)
+        btfss   port, pin
+else
+        btfsc   port, pin
+endif
+
+        btfsc   STATUS, Z
+        goto    in_wait_done2
+
+if (goal_high)
+        btfss   port, pin
+else
+        btfsc   port, pin
+endif
+        goto    in_wait_lp
+
+        nop
+
+in_wait_done1:
+        nop
+
+in_wait_done2:
 
         endm
 
@@ -2597,6 +2667,9 @@ load_settings:
         moviw   FSR1++
         call    inter_set_schmitt
 
+        moviw   FSR1++
+        call    inter_set_osctune
+
         return
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -2679,6 +2752,9 @@ save_user_settings:
         call    save_byte
 
         call    inter_get_schmitt
+        call    save_byte
+
+        call    inter_get_osctune
         call    save_last_byte
 
         return
@@ -2846,6 +2922,26 @@ inter_set_invert_out:
         btfsc   WREG, 0
         bsf     BAUD1CON, SCKP
 
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set W according to OSCTUNE.
+inter_get_osctune:
+        movlb   1
+        movfw   OSCTUNE
+        movlb   0
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Set OSCTUNE according to W.
+inter_set_osctune
+        movlb   1
+        movwf   OSCTUNE
         movlb   0
 
         return
@@ -3062,7 +3158,15 @@ interactive_no_ok:
         btfsc   STATUS, Z
         goto    inter_cmd_debug
 
-        addlw   'G' - 'L'
+        addlw   'G' - 'O'
+        btfsc   STATUS, Z
+        goto    inter_cmd_calibrate
+
+        addlw   'O' - 'T'
+        btfsc   STATUS, Z
+        goto    inter_cmd_osctune
+
+        addlw   'T' - 'L'
         btfsc   STATUS, Z
         goto    inter_cmd_load
 
@@ -3086,6 +3190,9 @@ inter_error_just_read:          ; goto this place when a wrong char has just bee
         goto    inter_error_lp
 
 inter_error:
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        goto    inter_done
+
         movlw   'E'
         call    write_char
         movlw   'r'
@@ -3154,6 +3261,297 @@ clear_input:
 
         movlb   0
 
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; This function reads ten 'U' characters from the UART input and
+;;; counts clock cycles per two bits 40 times. These cycle counts are
+;;; output on UART after the measurements for use in calibrating the
+;;; oscillator. The zero flag is set on error.
+calibrate_clock:
+        btfsc   INTER_MODE, 0
+        bcf     RC1STA, CREN    ; Disable receive if Raspberry Pi since we read manually
+
+        movlw   0x01
+        movwf   FSR1H
+        movlw   0x20
+        movwf   FSR1L           ; use bank 2 for storing results
+
+        movlw   0x0A
+        movwf   INTER_TMP2      ; 10 rounds
+calibrate_lp:
+        call    read_U_timed
+        btfsc   STATUS, Z
+        goto    calibrate_err  ; Zero flag set indicating error
+
+        decfsz  INTER_TMP2, f
+        goto    calibrate_lp
+
+        ;; We now have 40 timing measurements
+
+        btfsc   INTER_MODE, 0
+        bsf     RC1STA, CREN    ; Enable receive if Raspberry Pi
+
+        call    clear_input     ; Get rid of any 'U's read by the built in UART if Raspberry Pi
+
+        bcf     STATUS, Z       ; Indicate to read_newline that no error has occurred
+        call    read_newline
+        btfsc   STATUS, Z
+        goto    calibrate_err2
+
+        movlw   0x01
+        movwf   FSR1H
+        movlw   0x20
+        movwf   FSR1L           ; reset pointer
+
+        movlw   0x28
+        movwf   INTER_TMP2      ; 40 rounds
+calibrate_print_lp:
+        moviw   FSR1++
+        call    write_hex
+
+        moviw   FSR1++
+        call    write_hex
+
+        movlw   '\n'
+        call    write_char
+
+        decfsz  INTER_TMP2, f
+        goto    calibrate_print_lp
+
+calibrate_done:
+        btfsc   INTER_MODE, 0
+        bsf     RC1STA, CREN    ; Enable receive if Raspberry Pi
+
+        call    wait_100ms
+
+        call    clear_input     ; Clear input (only matters if Raspberry Pi)
+
+        bcf     STATUS, Z       ; indicate success
+
+        return
+
+calibrate_err:
+        btfsc   INTER_MODE, 0
+        bsf     RC1STA, CREN    ; Enable receive if Raspberry Pi
+
+calibrate_err2:
+        call    wait_100ms
+
+        call    clear_input     ; Clear input (only matters if Raspberry Pi)
+
+        bsf     STATUS, Z       ; indicate error
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Reads a 'U' character from the UART while making clock cycle
+;;; measurements. This is a 'U' character:
+;;;   ____    __    __    __    __    __________
+;;;       |__|  |__|  |__|  |__|  |__|
+;;;      start 1  0  1  0  1  0  1  0  stop
+;;;
+;;;          |<--->|<--->|<--->|<--->|  four time measurements
+;;;
+;;; The zero flag is set on error.
+read_U_timed:
+        ;; Wait for start bit, precision is not that important
+        bsf     STATUS, Z       ; if an error should occur
+read_U_start_lp:
+        btfsc   CONFIG_PORT, CONFIG_PIN
+        return                  ; return error if CONFIG signal high (should not be in interactive mode)
+        call    get_bit
+        btfsc   STATUS, C       ; waiting for zero bit (start)
+        goto    read_U_start_lp
+
+        ;; Now, get the bits one at a time, measuring appropriate times
+
+        call    wait_for_one
+        btfsc   STATUS, Z
+        return
+
+        call    store_time
+
+        movfw   INTER_TM1H
+        movwf   INTER_TM2H
+        movfw   INTER_TM1L
+        movwf   INTER_TM2L      ; INTER_TM2H:L is now the stored wall time
+
+        nop                     ; adjust timing modulo 3 between store_time calls
+        nop
+
+        movlw   0x04
+        movwf   INTER_TMP       ; Counter for reads of bit
+read_U_lp:
+        call    wait_for_zero
+        btfsc   STATUS, Z
+        return
+
+        call    wait_for_one
+        btfsc   STATUS, Z
+        return
+
+        call    store_time
+
+        movfw   INTER_TM2L
+        subwf   INTER_TM1L, W
+        movwi   ++FSR1          ; store low byte in second position
+        movfw   INTER_TM2H
+        subwfb  INTER_TM1H, W
+        movwi   -1[FSR1]        ; store high byte in second position
+        incf    FSR1L, f
+
+        movfw   INTER_TM1H
+        movwf   INTER_TM2H
+        movfw   INTER_TM1L
+        movwf   INTER_TM2L      ; INTER_TM2H:L is now the stored wall time
+
+        decfsz  INTER_TMP, f
+        goto    read_U_lp
+
+        bcf     STATUS, Z       ; indicate success
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Save current time from timer1 to INTER_TM1H:L.
+store_time:
+        movfw   TMR1H
+        movwf   INTER_TM1H
+        movfw   TMR1L
+        movwf   INTER_TM1L
+
+        lsrf    INTER_TM1L, W
+        btfsc   STATUS, Z
+        incf    INTER_TM1H, f         ; Adjust for two cycle difference in reading high/low timer parts
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; 13 cycles including call and return. Get the input bit value at
+;;; cycle 9 of 13 including call and return. INTER_MODE is taken into
+;;; account.
+get_bit:
+        bsf     STATUS, C
+        btfsc   INTER_MODE, 0
+        goto    get_bit_rpi
+
+get_bit_man:                    ; 3 cycles to here
+        btfss   INTER_MODE, 1
+        goto    get_bit_man_idle_low
+
+get_bit_man_idle_high:          ; 5 cycles to here
+        nop                     ; adjust timing
+        btfss   UART_PORT, UART_PIN
+        bcf     STATUS, C
+        return                  ; 9 cycles to here
+
+get_bit_man_idle_low:           ; 6 cycles to here
+        btfsc   UART_PORT, UART_PIN
+        bcf     STATUS, C
+        return                  ; 9 cycles to here
+
+get_bit_rpi:                    ; 4 cycles to here
+        nop                     ; adjust timing
+        nop                     ; adjust timing
+        btfss   UART2_PORT, UART2_PIN
+        bcf     STATUS, C
+        return                  ; 9 cycles to here
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for a one bit using the in_wait macro. Adjust for INTER_MODE.
+;;; Zero flag set on error.
+wait_for_one:
+        btfsc   INTER_MODE, 0
+        goto    wait_for_one_rpi
+
+wait_for_one_man:
+        btfss   INTER_MODE, 1
+        goto    wait_for_one_man_idle_low
+
+wait_for_one_man_idle_high:
+        nop                     ; adjust timing
+
+        call    wait_for_uart_high ; idle is one
+
+        return
+
+wait_for_one_man_idle_low:
+        call    wait_for_uart_low
+
+        return
+
+wait_for_one_rpi:
+        nop                     ; adjust timing
+        nop                     ; adjust timing
+
+        call    wait_for_uart2_high
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for a zero bit using the in_wait macro. Adjust for
+;;; INTER_MODE. Zero flag set on error.
+wait_for_zero:
+        btfsc   INTER_MODE, 0
+        goto    wait_for_zero_rpi
+
+wait_for_zero_man:
+        btfss   INTER_MODE, 1
+        goto    wait_for_zero_man_idle_low
+
+wait_for_zero_man_idle_high:
+        nop                     ; adjust timing
+
+        call    wait_for_uart_low ; idle is one
+
+        return
+
+wait_for_zero_man_idle_low:
+        call    wait_for_uart_high
+
+        return
+
+wait_for_zero_rpi:
+        nop                     ; adjust timing
+        nop                     ; adjust timing
+
+        call    wait_for_uart2_low
+
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for low signal on UART using in_wait macro.
+wait_for_uart_low:
+        in_wait UART_PORT, UART_PIN, 0
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for high signal on UART using in_wait macro.
+wait_for_uart_high:
+        in_wait UART_PORT, UART_PIN, 1
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for low signal on UART2 using in_wait macro.
+wait_for_uart2_low:
+        in_wait UART2_PORT, UART2_PIN, 0
+        return
+
+;;; /////////////////////////////////////////////////////////////////////////////
+
+;;; Wait for high signal on UART2 using in_wait macro.
+wait_for_uart2_high:
+        in_wait UART2_PORT, UART2_PIN, 1
         return
 
 ;;; /////////////////////////////////////////////////////////////////////////////
@@ -3412,7 +3810,8 @@ read_hex_dbl:
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
-;;; Read a newline (or return followed by newline).
+;;; Read a newline (or return followed by newline). Zero flag is set
+;;; on error.
 read_newline:
         btfsc   STATUS, Z
         return
@@ -3722,6 +4121,8 @@ inter_cmd_output:
 
         call    inter_output_schmitt
 
+        call    inter_output_osctune
+
         goto    interactive_no_ok
 
 ;;; //////////
@@ -3780,6 +4181,46 @@ inter_cmd_debug:
         call    output_debug
 
         goto    interactive_no_ok
+
+;;; //////////
+
+inter_cmd_calibrate:
+        bcf     STATUS, Z       ; Indicate that no error has occurred
+
+        call    read_newline
+
+        btfsc   STATUS, Z
+        goto    inter_error_just_read
+
+        call    calibrate_clock
+
+        btfsc   STATUS, Z
+        goto    inter_error
+
+        goto    interactive_no_ok
+
+;;; //////////
+
+inter_cmd_osctune:
+        bcf     STATUS, Z       ; Indicate that no error has occurred
+
+        call    read_hex_dbl
+        movwf   INTER_VALUE
+
+        btfsc   INTER_VALUE, 7
+        call    inter_error     ; Value should be of the form 00xxxxxx
+        btfsc   INTER_VALUE, 6
+        call    inter_error     ; Value should be of the form 00xxxxxx
+
+        call    read_newline
+
+        btfsc   STATUS, Z
+        goto    inter_error_just_read
+
+        movfw   INTER_VALUE
+        call    inter_set_osctune
+
+        goto    interactive
 
 ;;; //////////
 
@@ -3948,6 +4389,20 @@ inter_output_invert_out:
         call    inter_get_invert_out
         addlw   '0'
         call    write_char
+
+        movlw   '\n'
+        call    write_char
+
+        return
+
+;;; //////////
+
+inter_output_osctune:
+        movlw   'T'
+        call    write_char
+
+        call    inter_get_osctune
+        call    write_hex
 
         movlw   '\n'
         call    write_char
@@ -4261,98 +4716,99 @@ output_debug:
         return
 
 ;;; This is extra debug info that is not generally needed:
-        movlw   'F'
-        call    write_char
 
-        movlw   'B'
-        call    write_char
+;;;     movlw   'F'
+;;;     call    write_char
 
-        movlw   ' '
-        call    write_char
+;;;     movlw   'B'
+;;;     call    write_char
 
-        movfw   BK_FREEH
-        call    write_hex
+;;;     movlw   ' '
+;;;     call    write_char
 
-        movfw   BK_FREEL
-        call    write_hex
+;;;     movfw   BK_FREEH
+;;;     call    write_hex
 
-        movlw   '\n'
-        call    write_char
+;;;     movfw   BK_FREEL
+;;;     call    write_hex
 
-        movlw   LOW(REF0) + 11
-        movwf   FSR1L
-        movlw   HIGH(REF0)
-        movwf   FSR1H
+;;;     movlw   '\n'
+;;;     call    write_char
 
-        moviw   FSR1--
-        call    write_hex
+;;;     movlw   LOW(REF0) + 11
+;;;     movwf   FSR1L
+;;;     movlw   HIGH(REF0)
+;;;     movwf   FSR1H
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        movlw   '\n'
-        call    write_char
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        movlw   LOW(BANK0) + 7
-        movwf   FSR1L
-        movlw   HIGH(BANK0)
-        movwf   FSR1H
+;;;     movlw   '\n'
+;;;     call    write_char
 
-        moviw   FSR1--
-        call    write_hex
+;;;     movlw   LOW(BANK0) + 7
+;;;     movwf   FSR1L
+;;;     movlw   HIGH(BANK0)
+;;;     movwf   FSR1H
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        moviw   FSR1--
-        call    write_hex
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        movlw   '\n'
-        call    write_char
+;;;     moviw   FSR1--
+;;;     call    write_hex
 
-        return
+;;;     movlw   '\n'
+;;;     call    write_char
+
+;;;     return
 
 ;;; /////////////////////////////////////////////////////////////////////////////
 
